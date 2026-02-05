@@ -11,7 +11,7 @@ API_URL = "https://api-iok6.onrender.com/api/get_history"
 DB_FILE = ":memory:"
 
 # =====================================================
-# 🧠 APEX QUANTUM ENGINE (V2 ULTIMATE FROM PP.PY)
+# 🧠 APEX QUANTUM ENGINE (V2 ULTIMATE)
 # =====================================================
 class ApexQuantum:
     
@@ -65,10 +65,8 @@ class ApexQuantum:
             elif str3 > 0.90: 
                 best_pred, best_strength = pred3, str3
             else:
-                # If patterns conflict, we return WAITING (Low Bet Hidden)
                 return None, "WAITING... (CONFLICT)", 0.0
         else:
-            # No conflict, pick the strongest
             best_pred = pred5 if str5 >= str4 else pred4
             best_strength = max(str5, str4, str3)
 
@@ -81,15 +79,14 @@ class ApexQuantum:
         high_req = 0.65
         
         if current_streak > 0:
-            sureshot_req += 0.05  # Require 90%
-            high_req += 0.05      # Require 70%
+            sureshot_req += 0.05
+            high_req += 0.05
 
         # 3. PATTERN FILTERS
         last_val = history[0]['size']
         prev_val = history[1]['size']
         
         is_trending = (last_val == best_pred)
-        # ZigZag: Betting that the pattern B-S-B will continue
         is_zigzag = (last_val != prev_val and best_pred != last_val)
 
         # Symmetry Check
@@ -98,29 +95,22 @@ class ApexQuantum:
         is_symmetric = (n1 + n2 == 9) or (n1 == n2)
 
         # 4. FINAL DECISION TREE
-        # Note: We return None for prediction on LOW BETS to hide them
-
-        # A. RECOVERY (Top Priority)
         if current_streak >= 2:
-            # Safety: If market is totally random (<50%), don't force recovery
             if best_strength < 0.50: 
                 return None, "SKIP (VOLATILE)", 0.0
             return best_pred, "RECOVERY", best_strength
 
-        # B. SURESHOT
         elif best_strength > sureshot_req and is_symmetric:
             return best_pred, "SURESHOT", best_strength
             
-        # C. HIGH BET (Supports Trend OR ZigZag)
         elif best_strength > high_req and (is_trending or is_zigzag):
             return best_pred, "HIGH BET", best_strength
             
         else:
-            # HIDE LOW BETS
             return None, "WAITING...", 0.0
 
 # =====================================================
-# 🗄️ OMEGA STORAGE
+# 🗄️ OMEGA STORAGE (FAST BOOT VERSION)
 # =====================================================
 class OmegaStorage:
     def __init__(self):
@@ -130,42 +120,44 @@ class OmegaStorage:
         self.conn.commit()
     
     def sync_fast(self):
-        """Fetches latest 500 results (OPTIMAL FOR ACCURACY)."""
-        all_data = []
-        
+        """
+        Fetches latest 500 results page-by-page.
+        UPDATED: Commits data immediately so UI loads instantly.
+        """
         # LOOP 25 TIMES x 20 ITEMS = 500 RECORDS
         for page in range(1, 26): 
             try:
-                # Timeout set to 2s to keep it snappy
+                # Fetch 1 page
                 r = requests.get(API_URL, params={"size": "20", "pageSize": "20", "pageNo": str(page)}, timeout=2)
                 
                 if r.status_code == 200:
                     data = r.json().get('data', {}).get('list', [])
                     if not data: break
-                    all_data.extend(data)
+                    
+                    # PROCESS & INSERT IMMEDIATELY (Don't wait for all pages)
+                    bulk_data = []
+                    for item in data:
+                        try:
+                            issue = str(item['issueNumber'])
+                            num = int(item['number'])
+                            s = "BIG" if num >= 5 else "SMALL"
+                            
+                            if num in [0, 5]: c = "VIOLET"
+                            elif num % 2 == 1: c = "GREEN"
+                            else: c = "RED"
+                            
+                            bulk_data.append((issue, num, s, c, str(datetime.now())))
+                        except: continue
+                    
+                    if bulk_data:
+                        self.cursor.executemany("INSERT OR IGNORE INTO results VALUES (?, ?, ?, ?, ?)", bulk_data)
+                        self.conn.commit() # <--- THIS MAKES IT SHOW INSTANTLY
+                        
                 else: 
                     break
             except: 
                 break
             
-        bulk_data = []
-        for item in all_data:
-            try:
-                issue = str(item['issueNumber'])
-                num = int(item['number'])
-                s = "BIG" if num >= 5 else "SMALL"
-                
-                if num in [0, 5]: c = "VIOLET"
-                elif num % 2 == 1: c = "GREEN"
-                else: c = "RED"
-                
-                bulk_data.append((issue, num, s, c, str(datetime.now())))
-            except: continue
-            
-        if bulk_data:
-            self.cursor.executemany("INSERT OR IGNORE INTO results VALUES (?, ?, ?, ?, ?)", bulk_data)
-            self.conn.commit()
-
     def get_history(self, limit=2000):
         try:
             self.cursor.execute(f"SELECT issue, number, size, color FROM results ORDER BY issue DESC LIMIT {limit}")
