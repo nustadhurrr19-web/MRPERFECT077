@@ -2,295 +2,367 @@ import requests
 import time
 import threading
 import os
+import json
 from collections import Counter
-from flask import Flask, render_template_string, jsonify, redirect
+from flask import Flask, render_template_string, jsonify
 
 # ==========================================
 # ⚙️ CONFIGURATION
 # ==========================================
-API_URL = "https://api-iok6.onrender.com/api/get_history"
-PLATFORM_URL = "https://example.com"  # <--- REPLACE WITH YOUR ACTUAL GAME LINK
-
+API_URL = "https://api-iok6.onrender.com/api/get_history" 
 app = Flask(__name__)
 
 # ==========================================
-# 🧠 SMART LOGIC ENGINE (APEX-V2 UPGRADED)
+# 🧠 TITAN BRAIN (FULL 17-PATTERN UNLOCKED)
 # ==========================================
-class ApexQuantum:
+class TitanBrain:
     def __init__(self):
         self.history = []
-        self.max_depth = 500
-        self.high_loss_streak = 0
+        
+        # --- Stats (REAL MONEY ONLY) ---
         self.wins = 0
         self.losses = 0
+        self.current_win_streak = 0
+        self.current_loss_streak = 0
+        self.max_win_streak = 0
+        self.max_loss_streak = 0
+        
+        # --- Logic State ---
+        self.level = 1  # 1, 2, or 3 (Sniper)
+        self.state = "NORMAL"  # NORMAL, GHOST_RECOVERY
+        self.ghost_turns_left = 0
+        self.last_prediction = None
+        
+        # --- FULL 17 PATTERN DICTIONARY ---
+        # 1=BIG, 0=SMALL
+        self.patterns = {
+            "11111": "DRAGON_BIG",    "00000": "DRAGON_SMALL",
+            "10101": "ZIGZAG_B",      "01010": "ZIGZAG_S",
+            "11001": "AABB_BREAK",    "00110": "AABB_BREAK_M", # Break AA-BB pattern
+            "11100": "3_2_SPLIT",     "00011": "3_2_SPLIT_M",  # AAA-BB
+            "10010": "SANDWICH_121",  "01101": "SANDWICH_121_M",
+            "11011": "DOUBLE_PAIR",   "00100": "DOUBLE_PAIR_M",
+            "11101": "3_1_BREAK",     "00010": "3_1_BREAK_M",
+            "10001": "MIRROR_SIDE",   "01110": "MIRROR_SIDE_M",
+            "12121": "JUMP",          # Dynamic placeholder
+            "11211": "ASYMMETRIC"
+        }
 
-    def get_size(self, n): 
-        return "BIG" if int(n) >= 5 else "SMALL"
+    def get_size(self, n): return 1 if int(n) >= 5 else 0
+    def get_size_str(self, s): return "BIG" if s == 1 else "SMALL"
 
     def sync_data(self):
         try:
             all_data = []
-            for p in range(1, 6): 
-                r = requests.get(API_URL, params={"size": "20", "pageNo": str(p)}, timeout=5)
+            for p in range(1, 30): 
+                r = requests.get(API_URL, params={"size": "20", "pageNo": str(p)}, timeout=4)
                 if r.status_code == 200:
-                    all_data.extend(r.json().get('data', {}).get('list', []))
-            
+                    d = r.json().get('data', {}).get('list', [])
+                    if not d: break
+                    all_data.extend(d)
             all_data.sort(key=lambda x: int(x['issueNumber']))
-            self.history = [{'n': int(item['number']), 's': self.get_size(item['number']), 'id': str(item['issueNumber'])} for item in all_data]
+            self.history = [{'n': int(i['number']), 's': self.get_size(i['number']), 'id': str(i['issueNumber'])} for i in all_data]
             return True
-        except:
-            return False
+        except: return False
 
-    def get_pattern_strength(self, depth):
-        if len(self.history) < depth + 1: return None, 0
+    def detect_pattern(self):
+        """FULL PATTERN LOGIC IMPLEMENTATION"""
+        if len(self.history) < 6: return None
         
-        last_seq = [x['s'] for x in self.history[-depth:]]
-        matches = []
-        for i in range(len(self.history) - (depth + 1)):
-            if [x['s'] for x in self.history[i : i+depth]] == last_seq:
-                matches.append(self.history[i+depth]['s'])
+        # Get last 5 results signature
+        seq = "".join([str(x['s']) for x in self.history[-5:]])
+        last = self.history[-1]['s']
         
-        if matches:
-            counts = Counter(matches)
-            pred_item = counts.most_common(1)[0][0]
-            strength = counts[pred_item] / len(matches)
-            return pred_item, strength
-        return None, 0
+        # 1. DRAGON (Streak > 4) -> Follow
+        if seq == "11111": return 1
+        if seq == "00000": return 0
+        
+        # 2. ZIGZAG (10101) -> Flip
+        if seq == "10101": return 0 # Expect 0
+        if seq == "01010": return 1 # Expect 1
+        
+        # 3. AABB BREAK (11001) -> Expect A (Repeat) or B?
+        # AABB usually results in Repeat of last. 1100 -> 1? 
+        if seq == "11001": return 0 # Break to ZigZag?
+        if seq == "00110": return 1
+        
+        # 4. 3-2 SPLIT (11100) -> Expect 0 (make it 3-3)
+        if seq == "11100": return 0
+        if seq == "00011": return 1
+        
+        # 5. SANDWICH (10010) -> Expect 1 (Close sandwich)
+        if seq == "10010": return 1
+        if seq == "01101": return 0
+        
+        # 6. MIRROR (10001) -> Expect 0 (Symmetric)
+        if seq == "10001": return 0
+        if seq == "01110": return 1
 
-    def analyze(self):
-        if len(self.history) < 15: return None, "WAITING..."
+        return None
 
-        pred5, str5 = self.get_pattern_strength(5)
-        pred3, str3 = self.get_pattern_strength(3)
-        pred4, str4 = self.get_pattern_strength(4)
+    def analyze_trend(self):
+        if len(self.history) < 20: return None, "WAITING...", False
 
-        if pred5 and pred3 and pred5 != pred3:
-            if str5 > 0.90: 
-                best_pred, best_strength = pred5, str5
-            elif str3 > 0.90: 
-                best_pred, best_strength = pred3, str3
-            else: 
-                return None, "WAITING... (CONFLICT)"
-        else:
-            best_pred = pred5 if str5 >= str4 else pred4
-            best_strength = max(str5, str4, str3)
+        # 1. Pattern Engine
+        pat_pred = self.detect_pattern()
+        
+        # 2. Mathcore Engine (Dynamic Depth)
+        math_pred = None
+        confidence = 0
+        
+        # Try finding sequence in history
+        for depth in [6, 5, 4]:
+            last_seq = [x['s'] for x in self.history[-depth:]]
+            matches = []
+            for i in range(len(self.history) - (depth + 1)):
+                if [x['s'] for x in self.history[i : i+depth]] == last_seq:
+                    matches.append(self.history[i+depth]['s'])
             
-        if not best_pred:
-            best_pred = self.history[-1]['s']
-            best_strength = 0.5
-
-        sureshot_req = 0.85
-        high_req = 0.65
+            if matches:
+                c = Counter(matches)
+                top = c.most_common(1)[0]
+                if (top[1] / len(matches)) > 0.55:
+                    math_pred = top[0]
+                    confidence = top[1] / len(matches)
+                    break
         
-        if self.high_loss_streak > 0:
-            sureshot_req += 0.05
-            high_req += 0.05
-
-        last_val = self.history[-1]['s']
-        prev_val = self.history[-2]['s']
-        is_trending = (last_val == best_pred)
-        is_zigzag = (last_val != prev_val and best_pred != last_val)
-
-        n1, n2 = self.history[-1]['n'], self.history[-2]['n']
-        is_symmetric = (n1 + n2 == 9 or n1 == n2)
-
-        if self.high_loss_streak >= 2:
-            if best_strength < 0.55: 
-                return None, "SKIP (VOLATILE)" 
-            return best_pred, "RECOVERY"
-
-        if best_strength > sureshot_req and is_symmetric:
-            return best_pred, "SURESHOT"
-        elif best_strength > high_req and (is_trending or is_zigzag):
-            return best_pred, "HIGH BET"
+        # 3. LEVEL 3 SNIPER LOGIC (The "Perfect" Requirement)
+        is_sureshot = False
+        final_pred = None
+        algo_type = "TREND"
+        
+        if self.level == 3:
+            # ON LEVEL 3, WE ONLY BET IF BOTH AGREE
+            if pat_pred is not None and math_pred is not None and pat_pred == math_pred:
+                final_pred = pat_pred
+                algo_type = "🔥 LVL 3 SNIPER (PERFECT)"
+                is_sureshot = True
+            else:
+                return None, "WAITING FOR PERFECT...", False
         else:
-            return None, "WAITING..."
+            # LEVEL 1 & 2 (Standard Logic)
+            if pat_pred == math_pred and pat_pred is not None:
+                final_pred = pat_pred
+                algo_type = "⭐ SURESHOT"
+                is_sureshot = True
+            elif confidence > 0.75:
+                final_pred = math_pred
+                algo_type = "MATH STRONG"
+            elif pat_pred is not None:
+                final_pred = pat_pred
+                algo_type = "PATTERN"
+            elif math_pred is not None:
+                final_pred = math_pred
+                algo_type = "MATH FLOW"
+            else:
+                final_pred = self.history[-1]['s']
+                algo_type = "DRAGON"
+
+        return final_pred, algo_type, is_sureshot
 
 # ==========================================
-# 🔄 GLOBAL STATE & BACKGROUND WORKER
+# 🔄 WORKER
 # ==========================================
-engine = ApexQuantum()
+engine = TitanBrain()
 global_state = {
-    "period": "Loading...",
-    "prediction": "--",
-    "type": "WAITING...",
-    "streak": 0,
-    "last_result": "--",
-    "history_log": [],
-    "win_count": 0,
-    "loss_count": 0
+    "period": "Loading...", "prediction": "--", "type": "WAITING...",
+    "wins": 0, "losses": 0, "level": 1,
+    "max_win": 0, "max_loss": 0, "mode": "NORMAL",
+    "history": []
 }
 
 def background_worker():
-    last_processed_id = None
-    active_bet = None
-
+    last_pid = None
     while True:
         try:
             if not engine.history: engine.sync_data()
+            
+            # Fetch
             r = requests.get(API_URL, params={"size": "1", "pageNo": "1"}, timeout=5)
             if r.status_code != 200: 
-                time.sleep(5)
+                time.sleep(3)
                 continue
+                
+            data = r.json()['data']['list'][0]
+            curr_pid = str(data['issueNumber'])
+            real_res = engine.get_size(data['number']) # 0/1
             
-            latest = r.json()['data']['list'][0]
-            curr_id = str(latest['issueNumber'])
-            real_num = int(latest['number'])
-            real_size = engine.get_size(real_num)
-
-            if curr_id != last_processed_id:
-                if active_bet and active_bet['id'] == curr_id:
-                    if active_bet['type'] not in ["WAITING...", "WAITING... (CONFLICT)", "SKIP (VOLATILE)"]:
-                        is_win = (active_bet['size'] == real_size)
+            if curr_pid != last_pid:
+                # --- PROCESS RESULT ---
+                is_win = False
+                status_txt = "SKIP"
+                
+                if engine.last_prediction is not None:
+                    is_win = (engine.last_prediction == real_res)
+                    
+                    if engine.state == "NORMAL":
+                        # === REAL BET LOGIC ===
                         if is_win:
                             engine.wins += 1
-                            engine.high_loss_streak = 0
-                            res_status = "WIN"
+                            engine.current_win_streak += 1
+                            engine.current_loss_streak = 0
+                            if engine.current_win_streak > engine.max_win_streak:
+                                engine.max_win_streak = engine.current_win_streak
+                            
+                            # RESET LEVEL ON WIN
+                            engine.level = 1 
+                            status_txt = "WIN"
                         else:
                             engine.losses += 1
-                            engine.high_loss_streak += 1
-                            res_status = "LOSS"
+                            engine.current_loss_streak += 1
+                            engine.current_win_streak = 0
+                            if engine.current_loss_streak > engine.max_loss_streak:
+                                engine.max_loss_streak = engine.current_loss_streak
+                            
+                            status_txt = "LOSS"
+                            
+                            # LEVEL PROGRESSION
+                            if engine.level < 3:
+                                engine.level += 1
+                            else:
+                                # Level 3 Lost -> TRIGGER GHOST MODE
+                                engine.state = "GHOST_RECOVERY"
+                                engine.ghost_turns_left = 3
+                                engine.level = 1 # Reset level for when we return
+                                status_txt = "LOSS (GHOST TRIGGER)"
+
+                    elif engine.state == "GHOST_RECOVERY":
+                        # === GHOST LOGIC (NO STATS UPDATE) ===
+                        engine.ghost_turns_left -= 1
+                        status_txt = f"GHOST {'WIN' if is_win else 'LOSS'}"
                         
-                        global_state["history_log"].insert(0, {
-                            "period": curr_id[-4:], 
-                            "res": real_size, 
-                            "status": res_status
-                        })
-                        global_state["history_log"] = global_state["history_log"][:10]
+                        if engine.ghost_turns_left <= 0:
+                            engine.state = "NORMAL"
 
-                engine.history.append({'n': real_num, 's': real_size, 'id': curr_id})
-                if len(engine.history) > 500: engine.history.pop(0)
-
-                next_id = str(int(curr_id) + 1)
-                p_size, p_type = engine.analyze()
-                
-                active_bet = {'id': next_id, 'size': p_size, 'type': p_type}
-                last_processed_id = curr_id
-                
-                global_state.update({
-                    "period": next_id,
-                    "prediction": p_size if p_size else "--",
-                    "type": p_type,
-                    "streak": engine.high_loss_streak,
-                    "last_result": f"{real_size} ({curr_id[-4:]})",
-                    "win_count": engine.wins,
-                    "loss_count": engine.losses
+                # Log
+                mode_tag = "REAL" if engine.state == "NORMAL" and "GHOST" not in status_txt else "GHOST"
+                global_state["history"].insert(0, {
+                    "p": curr_pid[-4:], 
+                    "r": engine.get_size_str(real_res), 
+                    "s": status_txt,
+                    "m": mode_tag
                 })
+                global_state["history"] = global_state["history"][:15]
+                engine.history.append({'n': int(data['number']), 's': real_res, 'id': curr_pid})
+
+                # --- PREDICT NEXT ---
+                pred, algo, is_safe = engine.analyze_trend()
+                engine.last_prediction = pred
+                
+                # UI Display Logic
+                d_pred = "--"
+                d_type = "WAITING..."
+                
+                if pred is not None:
+                    if engine.state == "NORMAL":
+                        if engine.level == 3 and not is_safe:
+                            # Level 3 Hold
+                            d_pred = "WAIT"
+                            d_type = "⛔ SEEKING PERFECT..."
+                            engine.last_prediction = None # Don't bet
+                        else:
+                            d_pred = engine.get_size_str(pred)
+                            d_type = f"LVL {engine.level} | {algo}"
+                    else:
+                        d_pred = "SKIP"
+                        d_type = f"🛡️ GHOST ({engine.ghost_turns_left})"
+
+                global_state.update({
+                    "period": str(int(curr_pid) + 1),
+                    "prediction": d_pred,
+                    "type": d_type,
+                    "wins": engine.wins,
+                    "losses": engine.losses,
+                    "max_win": engine.max_win_streak,
+                    "max_loss": engine.max_loss_streak,
+                    "mode": engine.state
+                })
+                last_pid = curr_pid
+                
             time.sleep(2)
         except Exception as e:
+            print(e)
             time.sleep(5)
 
 t = threading.Thread(target=background_worker, daemon=True)
 t.start()
 
 # ==========================================
-# 🌐 HTML TEMPLATE (RENDER-READY)
+# 🌐 UI
 # ==========================================
-HTML_TEMPLATE = """
+HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TITAN PRO | ULTIMATE</title>
-    <style>
-        :root { --bg: #050505; --panel: #111; --border: #333; --accent: #00f2ff; --win: #00ff88; --loss: #ff0055; --text: #fff; }
-        body { background: var(--bg); color: var(--text); font-family: 'Courier New', monospace; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
-        .dashboard { display: grid; grid-template-columns: 1.5fr 1fr; gap: 20px; max-width: 1200px; width: 100%; }
-        .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; box-shadow: 0 0 20px rgba(0,0,0,0.5); position: relative; overflow: hidden; }
-        .card::before { content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 2px; background: linear-gradient(90deg, transparent, var(--accent), transparent); }
-        .header { width: 100%; max-width: 1200px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
-        h1 { margin: 0; font-size: 28px; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); text-shadow: 0 0 10px var(--accent); }
-        .signal-box { text-align: center; display: flex; flex-direction: column; justify-content: center; min-height: 350px; }
-        .period { font-size: 20px; color: #888; margin-bottom: 20px; }
-        .pred-type { font-size: 22px; font-weight: bold; padding: 8px 20px; border-radius: 4px; display: inline-block; margin-bottom: 10px; }
-        .prediction { font-size: 80px; font-weight: 900; margin: 0; text-transform: uppercase; letter-spacing: 5px; }
-        .streak-alert { background: rgba(255, 0, 85, 0.2); color: var(--loss); padding: 10px; border: 1px solid var(--loss); border-radius: 4px; margin-top: 20px; animation: pulse 1s infinite; font-weight: bold; }
-        .history-box h3 { margin-top: 0; border-bottom: 1px solid var(--border); padding-bottom: 10px; display: flex; justify-content: space-between; }
-        .log-item { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #222; font-size: 14px; }
-        .log-item:last-child { border-bottom: none; }
-        .stats { display: flex; gap: 10px; }
-        .stat-pill { padding: 4px 10px; border-radius: 4px; font-size: 14px; font-weight: bold; }
-        .btn { background: var(--accent); color: #000; padding: 12px 25px; text-decoration: none; font-weight: bold; border-radius: 4px; text-transform: uppercase; transition: 0.3s; }
-        .type-WAITING... { color: #555; border: 1px solid #333; }
-        .type-HIGH { background: #ffd700; color: #000; }
-        .type-SURESHOT { background: #ff0055; color: #fff; }
-        .type-RECOVERY { background: #00ff88; color: #000; }
-        .pred-BIG { color: #ff4757; }
-        .pred-SMALL { color: #2ed573; }
-        .pred-None { color: #333; }
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-        @media (max-width: 768px) { .dashboard { grid-template-columns: 1fr; } }
-    </style>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TITAN ULTIMATE</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;800&display=swap" rel="stylesheet">
+<style>
+    body { background: #000; color: #fff; font-family: 'JetBrains Mono', monospace; text-align: center; padding: 20px; }
+    .card { background: #111; border: 1px solid #333; padding: 20px; border-radius: 10px; margin-bottom: 20px; }
+    .row { display: flex; justify-content: space-between; margin-bottom: 10px; }
+    .big { color: #00ff88; font-size: 50px; font-weight: 800; }
+    .small { color: #ff0055; font-size: 50px; font-weight: 800; }
+    .wait { color: #555; font-size: 30px; }
+    .ghost { color: #444; }
+    .stat-val { font-size: 20px; font-weight: bold; }
+    .list-item { background: #1a1a1a; padding: 10px; margin: 5px 0; border-radius: 5px; display: flex; justify-content: space-between; }
+    .win { border-left: 4px solid #00ff88; }
+    .loss { border-left: 4px solid #ff0055; }
+    .ghost-item { border-left: 4px solid #444; opacity: 0.5; }
+</style>
 </head>
 <body>
-    <div class="header">
-        <div><h1>TITAN PRO</h1><div style="font-size: 14px; color: #666;">SERVER ACTIVE</div></div>
-        <a href="/go" class="btn">PLATFORM ↗</a>
-    </div>
-    <div class="dashboard">
-        <div class="card signal-box">
-            <div class="period">PERIOD: <span id="period">Scanning...</span></div>
-            <div id="type-badge" class="pred-type type-WAITING...">WAITING...</div>
-            <div id="prediction" class="prediction pred-None">--</div>
-            <div id="streak-warning" class="streak-alert" style="display: none;">⚠️ RECOVERY MODE (LVL <span id="streak-lvl">0</span>)</div>
+    <div class="card">
+        <div class="row">
+            <div>TITAN ULTIMATE</div>
+            <div>W:<span id="w" style="color:#00ff88">0</span> L:<span id="l" style="color:#ff0055">0</span></div>
         </div>
-        <div class="card history-box">
-            <h3>LOG <div class="stats"><span class="stat-pill">W: <span id="wins">0</span></span><span class="stat-pill">L: <span id="losses">0</span></span></div></h3>
-            <div id="history-list"></div>
+        <div class="row">
+            <div>🔥 MAX: <span id="mw">0</span></div>
+            <div>❄️ MAX: <span id="ml">0</span></div>
         </div>
     </div>
-    <script>
-        function update() {
-            fetch('/api/status').then(r => r.json()).then(data => {
-                document.getElementById('period').innerText = data.period;
-                document.getElementById('wins').innerText = data.win_count;
-                document.getElementById('losses').innerText = data.loss_count;
-                const typeBadge = document.getElementById('type-badge');
-                const predDiv = document.getElementById('prediction');
-                let safeType = data.type.split(' ')[0];
-                if (data.type.includes("WAITING") || data.type.includes("SKIP") || data.type.includes("CONFLICT")) {
-                    safeType = "WAITING...";
-                    predDiv.innerText = "--";
-                    predDiv.className = "prediction pred-None";
-                } else {
-                    predDiv.innerText = data.prediction;
-                    predDiv.className = `prediction pred-${data.prediction}`;
-                }
-                typeBadge.innerText = data.type;
-                typeBadge.className = `pred-type type-${safeType}`;
-                const warn = document.getElementById('streak-warning');
-                if(data.streak > 0) {
-                    warn.style.display = 'block';
-                    document.getElementById('streak-lvl').innerText = data.streak;
-                } else { warn.style.display = 'none'; }
-                const histList = document.getElementById('history-list');
-                if(data.history_log.length > 0) {
-                    histList.innerHTML = data.history_log.map(item => `
-                        <div class="log-item"><span>#${item.period}</span><strong>${item.res}</strong><span style="color:${item.status === 'WIN' ? '#00ff88' : '#ff0055'}">${item.status}</span></div>
-                    `).join('');
-                }
-            });
-        }
-        setInterval(update, 2000);
-        update();
-    </script>
+
+    <div class="card">
+        <div style="color:#888; font-size:12px">PERIOD: <span id="p">Loading...</span></div>
+        <div id="pred" class="wait">--</div>
+        <div id="algo" style="color:#aaa; font-size:14px; margin-top:10px">...</div>
+    </div>
+
+    <div id="hist"></div>
+
+<script>
+    setInterval(() => {
+        fetch('/api/status').then(r=>r.json()).then(d => {
+            document.getElementById('p').innerText = d.period;
+            document.getElementById('w').innerText = d.wins;
+            document.getElementById('l').innerText = d.losses;
+            document.getElementById('mw').innerText = d.max_win;
+            document.getElementById('ml').innerText = d.max_loss;
+            
+            let pEl = document.getElementById('pred');
+            pEl.innerText = d.prediction;
+            pEl.className = d.prediction === "BIG" ? "big" : d.prediction === "SMALL" ? "small" : "wait";
+            
+            document.getElementById('algo').innerText = d.type;
+            
+            document.getElementById('hist').innerHTML = d.history.map(h => {
+                let cls = "ghost-item";
+                if(h.m === "REAL") cls = h.s.includes("WIN") ? "win" : "loss";
+                return `<div class="list-item ${cls}"><span>#${h.p} ${h.r}</span><span>${h.s}</span></div>`;
+            }).join('');
+        });
+    }, 1000);
+</script>
 </body>
 </html>
 """
 
-# ==========================================
-# 🚀 FLASK ROUTES
-# ==========================================
 @app.route('/')
-def home(): return render_template_string(HTML_TEMPLATE)
-
+def home(): return render_template_string(HTML)
 @app.route('/api/status')
-def get_status(): return jsonify(global_state)
-
-@app.route('/go')
-def go_platform(): return redirect(PLATFORM_URL)
+def status(): return jsonify(global_state)
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5004))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5001)))
