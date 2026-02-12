@@ -10,11 +10,11 @@ from flask import Flask, render_template_string, jsonify
 # ⚙️ CONFIGURATION
 # ==========================================
 API_URL = "https://api-iok6.onrender.com/api/get_history"
-SESSION_TARGET = 10  # Reset stats after this many wins
+SESSION_TARGET = 10  # Wins needed to reset session
 app = Flask(__name__)
 
 # ==========================================
-# 🧠 TITAN V5: SESSION MASTER BRAIN
+# 🧠 TITAN V6: PRECISION BRAIN
 # ==========================================
 class TitanBrain:
     def __init__(self):
@@ -31,10 +31,10 @@ class TitanBrain:
         
         # --- Logic State ---
         self.level = 1  # 1, 2, or 3
-        self.state = "NORMAL"  # NORMAL, GHOST_ANALYSIS, PAUSED
+        self.state = "NORMAL"  # NORMAL, GHOST_ANALYSIS
         self.ghost_turns_left = 0
         self.last_prediction = None
-        self.active_bet_type = "REAL" # "REAL" or "GHOST"
+        self.active_bet_type = "REAL" 
         
         # --- MATH ENGINE (Markov Order-3) ---
         self.markov_table = defaultdict(lambda: {'BIG': 0, 'SMALL': 0})
@@ -61,7 +61,8 @@ class TitanBrain:
         self.max_win_streak = 0
         self.max_loss_streak = 0
         self.session_wins = 0
-        # We don't reset history or learning, just the scoreboard
+        self.level = 1
+        self.state = "NORMAL"
 
     def sync_data(self):
         try:
@@ -115,39 +116,39 @@ class TitanBrain:
         
         # 2. STATE LOGIC
         if self.state == "GHOST_ANALYSIS":
-             # We are in the "3-4 Bet Skip" phase
-            return None, f"🛡️ ANALYZING TREND ({self.ghost_turns_left} LEFT)", False
+            return None, f"🛡️ ANALYZING TREND ({self.ghost_turns_left})", False
 
-        # 3. LEVEL LOGIC (Only applies if State is NORMAL)
+        # 3. LEVEL LOGIC (STRICT)
         if self.level == 1:
-            # LEVEL 1: Standard
+            # LEVEL 1: Standard (Safe Entry)
             if pat_pred is not None:
                 final_pred = pat_pred
                 algo_type = "LVL 1 | PATTERN"
-            elif math_pred is not None and math_conf > 0.55:
+            elif math_pred is not None and math_conf > 0.60:
                 final_pred = math_pred
                 algo_type = f"LVL 1 | MATH ({int(math_conf*100)}%)"
                 
         elif self.level == 2:
-            # LEVEL 2: Stronger
-            if pat_pred is not None and math_pred is not None and pat_pred == math_pred:
-                final_pred = pat_pred
-                algo_type = "LVL 2 | HYBRID AGREEMENT"
-            elif math_pred is not None and math_conf > 0.70:
-                final_pred = math_pred
-                algo_type = f"LVL 2 | MATH STRONG"
-            elif pat_pred is not None:
-                final_pred = pat_pred
-                algo_type = "LVL 2 | PATTERN LOCK"
+            # LEVEL 2: STRICT (Agree + 75% Conf)
+            if pat_pred is not None and math_pred is not None:
+                if pat_pred == math_pred and math_conf >= 0.75:
+                    final_pred = pat_pred
+                    algo_type = f"LVL 2 | STRONG ({int(math_conf*100)}%)"
+                else:
+                    return None, "⛔ LVL 2 WAIT (NEED 75% + AGREE)", False
+            else:
+                return None, "⛔ LVL 2 WAITING...", False
                 
         elif self.level == 3:
-            # LEVEL 3: PERFECT CONSENSUS REQUIRED
-            # This level is only reached AFTER the Ghost Phase completes
-            if pat_pred is not None and math_pred is not None and pat_pred == math_pred:
-                final_pred = pat_pred
-                algo_type = "🔥 LVL 3 | PERFECT TREND"
+            # LEVEL 3: SNIPER (Agree + 85% Conf)
+            if pat_pred is not None and math_pred is not None:
+                if pat_pred == math_pred and math_conf >= 0.85:
+                    final_pred = pat_pred
+                    algo_type = f"🔥 LVL 3 | SNIPER ({int(math_conf*100)}%)"
+                else:
+                    return None, "⛔ LVL 3 WAIT (NEED 85% + AGREE)", False
             else:
-                return None, "⛔ LVL 3 WAITING FOR PERFECT...", False
+                return None, "⛔ LVL 3 WAITING...", False
 
         return final_pred, algo_type, True
 
@@ -179,7 +180,7 @@ def background_worker():
             real_res = engine.get_size(data['number']) 
             
             if curr_pid != last_pid:
-                # --- PROCESS PREVIOUS ROUND ---
+                # --- PROCESS ROUND ---
                 is_win = False
                 status_txt = "SKIP"
                 
@@ -193,63 +194,58 @@ def background_worker():
                     is_win = (engine.last_prediction == real_res)
                     
                     if engine.active_bet_type == "REAL":
-                        # === REAL BET LOGIC ===
                         if is_win:
+                            # WIN LOGIC
                             engine.wins += 1
                             engine.session_wins += 1
                             engine.current_win_streak += 1
                             engine.current_loss_streak = 0
+                            
                             if engine.current_win_streak > engine.max_win_streak:
                                 engine.max_win_streak = engine.current_win_streak
                             
-                            # WIN -> RESET TO LEVEL 1
-                            engine.level = 1 
+                            engine.level = 1 # Reset to Level 1
                             status_txt = "WIN"
                             
-                            # CHECK SESSION TARGET
                             if engine.session_wins >= SESSION_TARGET:
                                 engine.reset_session()
                                 status_txt = "WIN (SESSION RESET)"
                                 
                         else:
+                            # LOSS LOGIC
                             engine.losses += 1
                             engine.current_loss_streak += 1
                             engine.current_win_streak = 0
+                            
                             if engine.current_loss_streak > engine.max_loss_streak:
                                 engine.max_loss_streak = engine.current_loss_streak
                             
                             status_txt = "LOSS"
                             
-                            # LOSS ESCALATION LOGIC
+                            # ESCALATION
                             if engine.level == 1:
                                 engine.level = 2
                             elif engine.level == 2:
-                                # LEVEL 2 LOST -> TRIGGER GHOST (Don't do Level 3 yet)
+                                # Level 2 Lost -> GHOST (Skip 3)
                                 engine.state = "GHOST_ANALYSIS"
                                 engine.ghost_turns_left = 3
-                                engine.level = 3 # Prepare level 3 for when we return
-                                status_txt = "LOSS (ANALYSIS TRIGGER)"
+                                engine.level = 3 # Next is Level 3
+                                status_txt = "LOSS (GHOST TRIGGER)"
                             elif engine.level == 3:
-                                # Level 3 Lost (Rare) -> Back to 1, Trigger long safety
+                                # Level 3 Lost -> GHOST (Skip 5) -> Reset
                                 engine.level = 1
                                 engine.state = "GHOST_ANALYSIS"
                                 engine.ghost_turns_left = 5
                                 status_txt = "LOSS (FULL RESET)"
 
                     elif engine.active_bet_type == "GHOST":
-                        # === GHOST LOGIC ===
-                        # Do NOT update wins/losses/streaks
                         engine.ghost_turns_left -= 1
                         status_txt = f"GHOST {'WIN' if is_win else 'LOSS'}"
-                        
                         if engine.ghost_turns_left <= 0:
-                            # Analysis complete, return to Real Betting
                             engine.state = "NORMAL"
-                            # We enter Level 3 now
                             engine.active_bet_type = "REAL"
 
                 # Log History
-                # Only show if it wasn't a standard "SKIP" (meaning we had a prediction)
                 if engine.last_prediction is not None or "TRIGGER" in status_txt:
                     mode_tag = "REAL" if engine.active_bet_type == "REAL" else "GHOST"
                     global_state["history"].insert(0, {
@@ -262,19 +258,12 @@ def background_worker():
 
                 # --- PREDICT NEXT ---
                 pred, algo, is_valid = engine.analyze()
-                
                 engine.last_prediction = pred
                 
-                # Determine Bet Type for Next Round
+                # Determine Bet Type
                 if engine.state == "GHOST_ANALYSIS":
                     engine.active_bet_type = "GHOST"
-                    # In analysis mode, we still predict to test internal logic, but we label it Ghost
-                    # Actually, for pure safety, we might NOT even predict if we want to skip perfectly
-                    # But to track "Ghost Win/Loss", we need a prediction.
-                    # We will use Level 2 logic for Ghost testing
-                    if pred is None: 
-                        # Force a dummy prediction if logic returns None, or just skip
-                        pass 
+                    # During Ghost, if prediction is None (Wait), we keep waiting
                 else:
                     engine.active_bet_type = "REAL"
 
@@ -286,7 +275,7 @@ def background_worker():
                     if engine.active_bet_type == "REAL":
                         d_pred = engine.get_size_str(pred)
                     else:
-                        d_pred = "SKIP" # Hide prediction from user during Ghost
+                        d_pred = "SKIP"
                         d_type = f"🛡️ ANALYZING ({engine.ghost_turns_left})..."
                 else:
                     d_pred = "WAIT"
@@ -314,40 +303,33 @@ t = threading.Thread(target=background_worker, daemon=True)
 t.start()
 
 # ==========================================
-# 🌐 UI TEMPLATE
+# 🌐 UI
 # ==========================================
 HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TITAN V5 SESSION MASTER</title>
+<title>TITAN V6 PRECISION</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;800&display=swap" rel="stylesheet">
 <style>
     :root { --bg: #050505; --card: #111; --text: #fff; --accent: #6366f1; --win: #00ff88; --loss: #ff0055; }
     body { background: var(--bg); color: var(--text); font-family: 'JetBrains Mono', monospace; text-align: center; padding: 20px; }
     .container { max-width: 600px; margin: 0 auto; }
-    
     .card { background: var(--card); border: 1px solid #222; padding: 20px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 30px rgba(0,0,0,0.5); }
-    
     .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 15px; margin-bottom: 15px; }
     .title { font-weight: 800; font-size: 20px; color: var(--accent); }
-    
     .stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
     .stat-box { background: #1a1a1a; padding: 10px; border-radius: 8px; }
     .stat-label { font-size: 10px; color: #666; display: block; }
     .stat-val { font-size: 18px; font-weight: bold; }
-    
     .pred-box { margin: 20px 0; }
     .big { color: var(--win); font-size: 60px; font-weight: 900; text-shadow: 0 0 20px rgba(0,255,136,0.2); }
     .small { color: var(--loss); font-size: 60px; font-weight: 900; text-shadow: 0 0 20px rgba(255,0,85,0.2); }
     .wait { color: #444; font-size: 40px; }
-    
     .level-badge { background: #333; padding: 5px 10px; border-radius: 4px; font-size: 12px; color: #aaa; margin-top: 10px; display: inline-block; }
-    
     .session-bar { width: 100%; height: 6px; background: #222; border-radius: 3px; margin-top: 10px; overflow: hidden; }
     .session-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.5s; }
-    
     .history-list { text-align: left; }
     .hist-item { display: flex; justify-content: space-between; padding: 10px; border-bottom: 1px solid #222; font-size: 13px; }
     .hist-win { border-left: 3px solid var(--win); background: rgba(0,255,136,0.05); }
@@ -359,13 +341,12 @@ HTML = """
     <div class="container">
         <div class="card">
             <div class="header">
-                <div class="title">TITAN V5</div>
+                <div class="title">TITAN V6</div>
                 <div style="font-size:12px; color:#666;">PERIOD: <span id="p">...</span></div>
             </div>
-            
             <div class="stats-row">
                 <div class="stat-box">
-                    <span class="stat-label">SESSION SCORE (TARGET: 10)</span>
+                    <span class="stat-label">SESSION (TARGET: 10)</span>
                     <span style="color:var(--win)">W:<span id="w">0</span></span> / <span style="color:var(--loss)">L:<span id="l">0</span></span>
                     <div class="session-bar"><div id="s-bar" class="session-fill"></div></div>
                 </div>
@@ -374,16 +355,23 @@ HTML = """
                     <span class="stat-val" style="color:var(--accent)" id="lvl">1</span>
                 </div>
             </div>
-            
+            <div class="stats-row">
+                <div class="stat-box">
+                    <span class="stat-label">SESSION MAX WIN 🔥</span>
+                    <span class="stat-val" style="color:var(--win)" id="mw">0</span>
+                </div>
+                <div class="stat-box">
+                    <span class="stat-label">SESSION MAX LOSS ❄️</span>
+                    <span class="stat-val" style="color:var(--loss)" id="ml">0</span>
+                </div>
+            </div>
             <div class="pred-box">
                 <div id="pred" class="wait">--</div>
                 <div id="algo" class="level-badge">INITIALIZING...</div>
             </div>
         </div>
-
         <div id="hist" class="history-list"></div>
     </div>
-
 <script>
     setInterval(() => {
         fetch('/api/status').then(r=>r.json()).then(d => {
@@ -391,29 +379,22 @@ HTML = """
             document.getElementById('w').innerText = d.wins;
             document.getElementById('l').innerText = d.losses;
             document.getElementById('lvl').innerText = d.level;
-            
-            // Session Bar
+            document.getElementById('mw').innerText = d.max_win;
+            document.getElementById('ml').innerText = d.max_loss;
             let pct = (d.session_progress / 10) * 100;
             if(pct > 100) pct = 100;
             document.getElementById('s-bar').style.width = pct + "%";
-            
             let pEl = document.getElementById('pred');
             let aEl = document.getElementById('algo');
-            
             pEl.innerText = d.prediction;
             pEl.className = d.prediction === "BIG" ? "big" : d.prediction === "SMALL" ? "small" : "wait";
-            
             aEl.innerText = d.type;
-            if(d.type.includes("ANALYZING")) aEl.style.color = "#ffaa00";
+            if(d.type.includes("WAIT")) aEl.style.color = "#ffaa00";
             else aEl.style.color = "#aaa";
-            
             document.getElementById('hist').innerHTML = d.history.map(h => {
                 let cls = "hist-ghost";
                 if(h.m === "REAL") cls = h.s.includes("WIN") ? "hist-win" : "hist-loss";
-                return `<div class="hist-item ${cls}">
-                    <span>#${h.p} <strong>${h.r}</strong></span>
-                    <span>${h.s}</span>
-                </div>`;
+                return `<div class="hist-item ${cls}"><span>#${h.p} <strong>${h.r}</strong></span><span>${h.s}</span></div>`;
             }).join('');
         });
     }, 1500);
