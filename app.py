@@ -2,65 +2,66 @@ import requests
 import time
 import threading
 import os
-import json
-from collections import Counter, defaultdict
+from collections import defaultdict
 from flask import Flask, render_template_string, jsonify
 
 # ==========================================
-# ⚙️ CONFIGURATION & ML SETUP
+# ⚙️ CONFIGURATION
 # ==========================================
 API_URL = "https://api-iok6.onrender.com/api/get_history"
-HISTORY_LIMIT = 500
-
-# Try to import AI Libraries (Graceful Fallback)
-ML_ACTIVE = False
-try:
-    from sklearn.ensemble import RandomForestClassifier
-    import numpy as np
-    ML_ACTIVE = True
-    print("✅ ML LIBRARIES DETECTED: AI ENGINE ACTIVE")
-except ImportError:
-    print("⚠️ ML LIBRARIES MISSING: Running in MATH+PATTERN Mode")
+HISTORY_LIMIT = 2000
 
 app = Flask(__name__)
 
 # ==========================================
-# 🧠 TITAN V13: TRINITY BRAIN
+# 🧠 DUAL CORE BRAIN (UPDATED LOGIC)
 # ==========================================
 class TitanBrain:
     def __init__(self):
         self.history = []
+        
+        # --- SIZE ENGINE ---
+        self.markov_size = defaultdict(lambda: {'BIG': 0, 'SMALL': 0})
+        self.pat_size = self.get_patterns()
+        
+        # --- COLOR ENGINE ---
+        self.markov_color = defaultdict(lambda: {'RED': 0, 'GREEN': 0})
+        self.pat_color = self.get_patterns() 
+        
+        # Stats & Session Management
         self.wins = 0
         self.losses = 0
-        self.last_pred = None
-        self.last_conf = "LOW"
+        self.session_wins = 0      # Tracks wins for the 10-win goal
+        self.consecutive_losses = 0 # Tracks back-to-back losses
         
-        # --- ENGINES ---
-        self.markov = defaultdict(lambda: {'BIG': 0, 'SMALL': 0})
-        self.patterns = {
+        self.last_pred = None     
+        self.last_type = "SIZE"   
+        self.last_conf = "LOW"
+        self.skip_next = False     # Logic to force a skip
+
+    def get_patterns(self):
+        # 0 = Small/Red, 1 = Big/Green
+        return {
             "11111": 1, "00000": 0, "10101": 0, "01010": 1,
             "11001": 0, "00110": 1, "11100": 0, "00011": 1,
             "10010": 1, "01101": 0, "11011": 0, "00100": 1,
-            "11101": 0, "00010": 1, "10001": 0, "01110": 1,
-            "12121": 0, "11211": 1, "11110": 0, "00001": 1,
-            "10000": 1, "01111": 0, "10111": 0, "01000": 1
+            "11101": 0, "00010": 1, "10001": 0, "01110": 1
         }
-        
-        # ML Model
-        self.model = None
-        if ML_ACTIVE:
-            self.model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
 
-    def get_size(self, n): return 1 if int(n) >= 5 else 0
+    # --- DATA PARSING ---
+    def get_size_val(self, n): return 1 if int(n) >= 5 else 0
     def get_size_str(self, s): return "BIG" if s == 1 else "SMALL"
+    
+    def get_color_val(self, n):
+        n = int(n)
+        if n in [1, 3, 5, 7, 9]: return 1 # Green
+        return 0 # Red
+
+    def get_color_str(self, c): return "GREEN" if c == 1 else "RED"
 
     def sync_data(self):
-        """TURBO SYNC (2000 Records)"""
         try:
-            print(f"🚀 SYNCING {HISTORY_LIMIT} RECORDS...")
             all_data = []
-            
-            # 1. Try Bulk
             try:
                 r = requests.get(API_URL, params={"size": str(HISTORY_LIMIT), "pageNo": "1"}, timeout=5)
                 if r.status_code == 200:
@@ -68,9 +69,8 @@ class TitanBrain:
                     if len(d) > 100: all_data = d
             except: pass
 
-            # 2. Fallback Loop
             if not all_data:
-                for p in range(1, 41): 
+                for p in range(1, 15): 
                     r = requests.get(API_URL, params={"size": "50", "pageNo": str(p)}, timeout=3)
                     if r.status_code == 200:
                         d = r.json().get('data', {}).get('list', [])
@@ -80,134 +80,119 @@ class TitanBrain:
             if not all_data: return False
 
             all_data.sort(key=lambda x: int(x['issueNumber']))
-            self.history = [{'n': int(i['number']), 's': self.get_size(i['number']), 'id': str(i['issueNumber'])} for i in all_data]
             
-            # Limit memory
+            self.history = []
+            for i in all_data:
+                n = int(i['number'])
+                self.history.append({
+                    'n': n,
+                    'id': str(i['issueNumber']),
+                    's_val': self.get_size_val(n),
+                    'c_val': self.get_color_val(n)
+                })
+            
             if len(self.history) > HISTORY_LIMIT:
                 self.history = self.history[-HISTORY_LIMIT:]
 
-            # Retrain All Engines
-            self.train_markov()
-            self.train_ml()
+            self.train_engines()
             return True
-        except Exception as e:
-            print(f"Sync Error: {e}")
-            return False
+        except: return False
 
-    def train_markov(self):
-        self.markov.clear()
+    def train_engines(self):
+        self.markov_size.clear()
+        self.markov_color.clear()
+        
         for i in range(3, len(self.history)):
-            p = (self.history[i-3]['s'], self.history[i-2]['s'], self.history[i-1]['s'])
-            r = 'BIG' if self.history[i]['s'] == 1 else 'SMALL'
-            self.markov[p][r] += 1
+            ps = (self.history[i-3]['s_val'], self.history[i-2]['s_val'], self.history[i-1]['s_val'])
+            rs = 'BIG' if self.history[i]['s_val'] == 1 else 'SMALL'
+            self.markov_size[ps][rs] += 1
+            
+            pc = (self.history[i-3]['c_val'], self.history[i-2]['c_val'], self.history[i-1]['c_val'])
+            rc = 'GREEN' if self.history[i]['c_val'] == 1 else 'RED'
+            self.markov_color[pc][rc] += 1
 
-    def train_ml(self):
-        if not ML_ACTIVE or len(self.history) < 100: return
-        
-        X = []
-        y = []
-        # Create features: Last 5 results
-        for i in range(5, len(self.history)):
-            features = [self.history[i-k]['s'] for k in range(1, 6)]
-            X.append(features)
-            y.append(self.history[i]['s'])
-        
-        self.model.fit(X, y)
-
-    def analyze(self):
-        # 1. PATTERN ENGINE
-        pat_vote = None
+    def analyze_core(self, mode):
+        pat_res = None
         if len(self.history) >= 6:
-            seq = "".join([str(x['s']) for x in self.history[-5:]])
-            pat_vote = self.patterns.get(seq)
+            seq = "".join([str(x[mode]) for x in self.history[-5:]])
+            pat_res = self.pat_size.get(seq)
 
-        # 2. MATH ENGINE (Markov)
-        math_vote = None
+        math_res = None
         math_conf = 0.5
+        target_markov = self.markov_size if mode == 's_val' else self.markov_color
+        t_0 = 'SMALL' if mode == 's_val' else 'RED'
+        t_1 = 'BIG' if mode == 's_val' else 'GREEN'
+        
         if len(self.history) >= 10:
-            last3 = (self.history[-3]['s'], self.history[-2]['s'], self.history[-1]['s'])
-            if last3 in self.markov:
-                s = self.markov[last3]
-                tot = s['BIG'] + s['SMALL']
+            last3 = (self.history[-3][mode], self.history[-2][mode], self.history[-1][mode])
+            if last3 in target_markov:
+                s = target_markov[last3]
+                tot = s[t_1] + s[t_0]
                 if tot > 0:
-                    if s['BIG'] > s['SMALL']: 
-                        math_vote = 1
-                        math_conf = s['BIG']/tot
-                    elif s['SMALL'] > s['BIG']: 
-                        math_vote = 0
-                        math_conf = s['SMALL']/tot
-
-        # 3. AI ENGINE (ML)
-        ml_vote = None
-        ml_conf = 0.0
-        if ML_ACTIVE and self.model and len(self.history) >= 6:
-            features = [self.history[-k]['s'] for k in range(1, 6)]
-            probs = self.model.predict_proba([features])[0]
-            if probs[1] > probs[0]: 
-                ml_vote = 1
-                ml_conf = probs[1]
-            else: 
-                ml_vote = 0
-                ml_conf = probs[0]
-
-        # === FUSION LOGIC ===
-        final_pred = None
-        level = "LOW"
-        sources = []
-
-        # Tally Votes
-        votes = {'BIG': 0, 'SMALL': 0}
+                    if s[t_1] > s[t_0]: 
+                        math_res = 1
+                        math_conf = s[t_1]/tot
+                    elif s[t_0] > s[t_1]: 
+                        math_res = 0
+                        math_conf = s[t_0]/tot
         
-        if pat_vote is not None: 
-            k = 'BIG' if pat_vote==1 else 'SMALL'
-            votes[k] += 1
-            sources.append("PAT")
-            
-        if math_vote is not None and math_conf > 0.55:
-            k = 'BIG' if math_vote==1 else 'SMALL'
-            votes[k] += 1
-            sources.append(f"MATH")
-            
-        if ml_vote is not None and ml_conf > 0.55:
-            k = 'BIG' if ml_vote==1 else 'SMALL'
-            votes[k] += 1.5 # AI vote counts more
-            sources.append(f"AI")
-
-        # Decision
-        if votes['BIG'] > votes['SMALL']:
-            final_pred = 1
-            score = votes['BIG']
-        elif votes['SMALL'] > votes['BIG']:
-            final_pred = 0
-            score = votes['SMALL']
-        else:
-            final_pred = self.history[-1]['s'] # Trend Follow Fallback
-            score = 0
-            sources = ["TREND"]
-
-        # Confidence Grading
-        if "AI" in sources and "PAT" in sources and "MATH" in sources:
-            level = "SURESHOT"
-        elif score >= 2:
-            level = "HIGH"
-        elif score >= 1:
-            level = "GOOD"
-        else:
-            level = "LOW"
-
-        # Format Source String
-        src_str = " + ".join(sources[:2])
-        if len(sources) > 2: src_str += "..."
+        score = 0
+        if pat_res is not None: score += 1
+        if math_res is not None and math_conf > 0.55: 
+            score += 1
+            if math_conf > 0.75: score += 1
         
-        return final_pred, src_str, level
+        if pat_res is not None and math_res is not None and pat_res == math_res:
+            score += 2
+            
+        best_pred = pat_res if pat_res is not None else (math_res if math_res is not None else 0)
+        
+        return best_pred, score, math_conf
+
+    def get_best_bet(self):
+        s_pred, s_score, s_conf = self.analyze_core('s_val')
+        c_pred, c_score, c_conf = self.analyze_core('c_val')
+        
+        # Penalty for Color
+        c_score_adj = c_score - 1.5
+        
+        final_target = None
+        final_type = "SIZE"
+        final_level = "LOW"
+        raw_score = 0
+        
+        if c_score_adj > s_score:
+            final_target = self.get_color_str(c_pred)
+            final_type = "COLOR"
+            raw_score = c_score
+        else:
+            final_target = self.get_size_str(s_pred)
+            final_type = "SIZE"
+            raw_score = s_score
+            
+        if raw_score >= 4: final_level = "SURESHOT"
+        elif raw_score >= 3: final_level = "HIGH"
+        elif raw_score >= 2: final_level = "GOOD"
+        else: final_level = "LOW"
+        
+        return final_target, final_type, final_level, raw_score
+
+    def reset_session(self):
+        self.wins = 0
+        self.losses = 0
+        self.session_wins = 0
+        self.consecutive_losses = 0
+        self.history = [] # Optional: clear data or just stats
+        # We keep data to maintain prediction accuracy, just reset stats
+        print(">>> SESSION RESET: 10 WINS ACHIEVED <<<")
 
 # ==========================================
-# 🔄 WORKER
+# 🔄 WORKER (INTELLIGENT SKIP)
 # ==========================================
 bot = TitanBrain()
 state = {
-    "period": "...", "pred": "--", "source": "...", "level": "LOW",
-    "wins": 0, "losses": 0, "data_count": 0, "history": []
+    "period": "...", "pred": "--", "type": "...", "level": "LOW",
+    "wins": 0, "losses": 0, "session": 0, "history": []
 }
 
 def worker():
@@ -219,51 +204,99 @@ def worker():
             r = requests.get(API_URL, params={"size": "1", "pageNo": "1"}, timeout=4)
             d = r.json()['data']['list'][0]
             cid = str(d['issueNumber'])
-            res = bot.get_size(d['number'])
+            n = int(d['number'])
             
             if cid != last_id:
-                # 1. PROCESS
+                # 1. CHECK PREVIOUS RESULT
                 status = "WAIT"
-                if bot.last_pred is not None:
-                    win = (bot.last_pred == res)
+                if bot.last_pred is not None and bot.last_pred != "SKIP":
+                    win = False
+                    
+                    if bot.last_type == "SIZE":
+                        real = bot.get_size_str(bot.get_size_val(n))
+                        win = (bot.last_pred == real)
+                    else:
+                        real_c_val = bot.get_color_val(n)
+                        real = bot.get_color_str(real_c_val)
+                        win = (bot.last_pred == real)
+                    
                     if win:
                         bot.wins += 1
+                        bot.session_wins += 1
+                        bot.consecutive_losses = 0 # Reset streak
                         status = "WIN"
                     else:
                         bot.losses += 1
+                        bot.consecutive_losses += 1
                         status = "LOSS"
                     
+                    # Update History UI
                     state["history"].insert(0, {
                         "p": cid[-4:], 
-                        "r": bot.get_size_str(res), 
+                        "r": f"{real} [{bot.last_type[0]}]", 
                         "s": status, 
                         "l": bot.last_conf
                     })
-                    state["history"] = state["history"][:25]
+                    state["history"] = state["history"][:20]
 
-                # Update Data
-                bot.history.append({'n': int(d['number']), 's': res, 'id': cid})
-                bot.train_markov()
-                bot.train_ml() # Re-train AI on new data
+                # 2. SESSION RESET CHECK
+                if bot.session_wins >= 10:
+                    bot.reset_session()
+                    state["history"] = [] # Clear UI history too
+                    state["history"].insert(0, {"p": "RESET", "r": "SESSION", "s": "DONE", "l": "10W"})
+
+                # 3. UPDATE DATA
+                bot.history.append({
+                    'n': n, 'id': cid,
+                    's_val': bot.get_size_val(n),
+                    'c_val': bot.get_color_val(n)
+                })
+                bot.train_engines()
                 if len(bot.history) > HISTORY_LIMIT: bot.history.pop(0)
 
-                # 2. PREDICT
-                pred, src, level = bot.analyze()
-                bot.last_pred = pred
-                bot.last_conf = level
+                # 4. DETERMINE THRESHOLD
+                # Default requires "GOOD" (Score 2) or better. "LOW" (Score < 2) is skipped.
+                required_score = 2 
                 
-                # Update UI
-                pred_str = bot.get_size_str(pred) if pred is not None else "--"
+                # If 2 losses back to back, Panic/Safe Mode -> Require "HIGH" (Score 3) or "SURESHOT"
+                if bot.consecutive_losses >= 2:
+                    required_score = 3
+                    
+                # 5. PREDICT
+                pred, p_type, level, raw_score = bot.get_best_bet()
                 
-                state.update({
-                    "period": str(int(cid) + 1),
-                    "pred": pred_str,
-                    "source": src,
-                    "level": level,
-                    "wins": bot.wins,
-                    "losses": bot.losses,
-                    "data_count": len(bot.history)
-                })
+                # 6. APPLY SKIP LOGIC
+                if raw_score < required_score:
+                    # Skip this round
+                    bot.last_pred = "SKIP"
+                    bot.last_type = "NONE"
+                    bot.last_conf = "SKIP"
+                    
+                    state.update({
+                        "period": str(int(cid) + 1),
+                        "pred": "SKIP",
+                        "type": "SKIPPING",
+                        "level": "WAIT", # UI Badge
+                        "wins": bot.wins,
+                        "losses": bot.losses,
+                        "session": bot.session_wins
+                    })
+                else:
+                    # Valid Bet
+                    bot.last_pred = pred
+                    bot.last_type = p_type
+                    bot.last_conf = level
+                    
+                    state.update({
+                        "period": str(int(cid) + 1),
+                        "pred": pred,
+                        "type": p_type,
+                        "level": level,
+                        "wins": bot.wins,
+                        "losses": bot.losses,
+                        "session": bot.session_wins
+                    })
+                
                 last_id = cid
                 
             time.sleep(1)
@@ -274,86 +307,81 @@ def worker():
 threading.Thread(target=worker, daemon=True).start()
 
 # ==========================================
-# 🌐 UI
+# 🌐 UI (UPDATED FOR SKIP & SESSION)
 # ==========================================
 HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TITAN V13</title>
-<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;700&display=swap" rel="stylesheet">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>TITAN V15 PRO</title>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;700&display=swap" rel="stylesheet">
 <style>
-    :root { --bg:#050505; --card:#0f0f0f; --text:#e0e0e0; --accent:#00d4ff; --win:#00ff9d; --loss:#ff3d5e; }
-    body { background: var(--bg); color: var(--text); font-family: 'Rajdhani', sans-serif; text-align: center; margin: 0; padding: 15px; }
+    :root { 
+        --bg: #000; --card: #111; --text: #fff;
+        --green: #00e676; --red: #ff1744; --blue: #2979ff; --yellow: #ffeb3b;
+    }
+    body { background: var(--bg); color: var(--text); font-family: 'Oswald', sans-serif; margin: 0; padding: 15px; text-align: center; text-transform: uppercase; }
     .container { max-width: 500px; margin: 0 auto; }
     
-    /* DASHBOARD CARD */
-    .dash { background: var(--card); border: 1px solid #222; border-radius: 12px; padding: 20px; box-shadow: 0 0 30px rgba(0, 212, 255, 0.1); margin-bottom: 20px; }
+    .card { background: var(--card); border: 1px solid #222; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
     
-    .top-bar { display: flex; justify-content: space-between; font-size: 14px; color: #666; margin-bottom: 10px; }
-    .data-meter { color: var(--accent); font-weight: bold; }
+    /* SCORE */
+    .score-row { display: flex; justify-content: space-between; font-size: 20px; margin-bottom: 5px; border-bottom: 1px solid #222; padding-bottom: 10px; }
+    .session-row { font-size: 14px; color: #888; margin-bottom: 15px; }
+    .w { color: var(--green); } .l { color: var(--red); }
     
-    .score { font-size: 28px; font-weight: bold; letter-spacing: 2px; margin-bottom: 5px; }
-    .w { color: var(--win); } .l { color: var(--loss); }
+    /* PREDICTION */
+    .pred-box { margin: 20px 0; min-height: 120px; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+    .type-badge { font-size: 14px; color: #666; letter-spacing: 2px; margin-bottom: 5px; }
     
-    /* PREDICTION DISPLAY */
-    .pred-area { margin: 25px 0; }
-    .big { color: var(--win); font-size: 80px; font-weight: bold; text-shadow: 0 0 25px rgba(0, 255, 157, 0.2); line-height: 1; }
-    .small { color: var(--loss); font-size: 80px; font-weight: bold; text-shadow: 0 0 25px rgba(255, 61, 94, 0.2); line-height: 1; }
+    .val-BIG, .val-SMALL { font-size: 80px; font-weight: bold; }
+    .val-BIG { color: var(--blue); text-shadow: 0 0 20px rgba(41, 121, 255, 0.4); }
+    .val-SMALL { color: #ff9100; text-shadow: 0 0 20px rgba(255, 145, 0, 0.4); }
     
-    /* LOGIC BADGES */
-    .logic-box { display: flex; justify-content: center; gap: 10px; align-items: center; margin-top: 15px; }
-    .badge { padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: bold; text-transform: uppercase; }
-    .b-src { background: #222; color: #888; border: 1px solid #333; }
+    .val-GREEN { color: var(--green); font-size: 80px; font-weight: bold; text-shadow: 0 0 20px rgba(0, 230, 118, 0.4); }
+    .val-RED { color: var(--red); font-size: 80px; font-weight: bold; text-shadow: 0 0 20px rgba(255, 23, 68, 0.4); }
     
-    .lvl-badge { padding: 6px 14px; border-radius: 4px; font-size: 14px; font-weight: bold; color: #000; }
-    .lvl-LOW { background: #555; color: #ccc; }
-    .lvl-GOOD { background: #00d4ff; }
-    .lvl-HIGH { background: #ff9100; }
-    .lvl-SURESHOT { background: #d500f9; box-shadow: 0 0 15px #d500f9; animation: pulse 1s infinite; color: #fff; }
+    .val-SKIP { font-size: 40px; color: #555; animation: pulse 2s infinite; }
     
-    /* HISTORY */
-    .hist-header { text-align: left; font-size: 12px; color: #666; margin-bottom: 8px; padding-left: 5px; }
-    .row { display: flex; justify-content: space-between; padding: 12px; background: #111; border-bottom: 1px solid #222; border-radius: 6px; margin-bottom: 4px; align-items: center; }
-    .row.WIN { border-left: 4px solid var(--win); }
-    .row.LOSS { border-left: 4px solid var(--loss); }
-    .h-res { font-weight: bold; font-size: 16px; }
-    .h-lvl { font-size: 10px; padding: 2px 6px; background: #222; border-radius: 3px; color: #888; margin-left: 8px; }
+    .conf-badge { padding: 5px 15px; border-radius: 4px; font-size: 16px; display: inline-block; color: #000; font-weight: bold; }
+    .lvl-WAIT { background: #333; color: #777; }
+    .lvl-GOOD { background: var(--blue); }
+    .lvl-HIGH { background: var(--green); }
+    .lvl-SURESHOT { background: #d500f9; color: #fff; animation: pulse 0.5s infinite; }
 
-    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
+    /* HISTORY */
+    .row { display: flex; justify-content: space-between; padding: 12px; background: #0a0a0a; border-radius: 6px; margin-bottom: 5px; align-items: center; border-left: 4px solid #333; }
+    .row.WIN { border-left-color: var(--green); }
+    .row.LOSS { border-left-color: var(--red); }
+    .row.DONE { border-left-color: var(--yellow); }
+    .res-txt { font-size: 14px; font-weight: bold; }
     
-    /* RESPONSIVE */
-    @media (min-width: 600px) { .container { max-width: 600px; } .big, .small { font-size: 100px; } }
+    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
 </style>
 </head>
 <body>
-    <div class="container">
-        <div class="dash">
-            <div class="top-bar">
-                <span>DATA: <span id="dm" class="data-meter">0</span>/2000</span>
-                <span>PERIOD: <span id="p" style="color:#fff">...</span></span>
-            </div>
-            
-            <div class="score">
-                <span class="w">W:<span id="w">0</span></span>
-                <span style="color:#333"> | </span>
-                <span class="l">L:<span id="l">0</span></span>
-            </div>
-            
-            <div class="pred-area">
-                <div id="pred" class="big">--</div>
-            </div>
-            
-            <div class="logic-box">
-                <span id="src" class="badge b-src">AI + MATH</span>
-                <span id="lvl" class="lvl-badge lvl-LOW">WAITING</span>
-            </div>
+
+<div class="container">
+    <div class="card">
+        <div class="score-row">
+            <span>TITAN V15</span>
+            <div><span class="w" id="w">0</span> / <span class="l" id="l">0</span></div>
         </div>
+        <div class="session-row">SESSION WINS: <span id="sess" style="color:#fff; font-weight:bold">0</span> / 10</div>
         
-        <div class="hist-header">RECENT SIGNAL HISTORY</div>
-        <div id="hist"></div>
+        <div style="font-size:12px; color:#666">PERIOD: <span id="p" style="color:#fff">...</span></div>
+        
+        <div class="pred-box">
+            <div id="type" class="type-badge">SCANNING...</div>
+            <div id="pred" class="val-BIG">--</div>
+            <div style="margin-top:15px"><span id="lvl" class="conf-badge lvl-WAIT">WAIT</span></div>
+        </div>
     </div>
+    
+    <div style="text-align:left; color:#666; font-size:12px; margin-bottom:10px">RECENT RESULTS</div>
+    <div id="hist"></div>
+</div>
 
 <script>
     setInterval(() => {
@@ -361,22 +389,32 @@ HTML = """
             document.getElementById('p').innerText = d.period;
             document.getElementById('w').innerText = d.wins;
             document.getElementById('l').innerText = d.losses;
-            document.getElementById('dm').innerText = d.data_count;
+            document.getElementById('sess').innerText = d.session;
             
             let pEl = document.getElementById('pred');
-            pEl.innerText = d.pred;
-            pEl.className = d.pred === "BIG" ? "big" : "small";
-            
-            document.getElementById('src').innerText = d.source;
+            let tEl = document.getElementById('type');
             let lEl = document.getElementById('lvl');
-            lEl.innerText = d.level;
-            lEl.className = `lvl-badge lvl-${d.level}`;
+            
+            if (d.pred === "SKIP") {
+                tEl.innerText = "WEAK SIGNAL";
+                pEl.innerText = "SKIPPING";
+                pEl.className = "val-SKIP";
+                lEl.innerText = "WAITING FOR SAFE ENTRY";
+                lEl.className = "conf-badge lvl-WAIT";
+            } else {
+                tEl.innerText = d.type + " MARKET";
+                pEl.innerText = d.pred;
+                pEl.className = `val-${d.pred}`; 
+                lEl.innerText = d.level;
+                lEl.className = `conf-badge lvl-${d.level}`;
+            }
             
             document.getElementById('hist').innerHTML = d.history.map(h => {
-                let cls = h.s.includes("WIN") ? "WIN" : "LOSS";
+                let cls = h.s === "WIN" ? "WIN" : (h.s === "LOSS" ? "LOSS" : "DONE");
                 return `<div class="row ${cls}">
-                    <div><span style="color:#444; margin-right:8px">#${h.p}</span> <span class="h-res">${h.r}</span></div>
-                    <div><span style="font-weight:bold; color:${cls=='WIN'?'#00ff9d':'#ff3d5e'}">${h.s}</span> <span class="h-lvl">${h.l}</span></div>
+                    <span style="color:#666">#${h.p}</span>
+                    <span style="color:#eee">${h.r}</span>
+                    <span class="res-txt" style="color:${cls=='WIN'?'#00e676':(cls=='LOSS'?'#ff1744':'#ffeb3b')}">${h.s}</span>
                 </div>`;
             }).join('');
         });
@@ -392,4 +430,5 @@ def home(): return render_template_string(HTML)
 def status(): return jsonify(state)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5008)
+    port = int(os.environ.get("PORT", 5003))
+    app.run(host='0.0.0.0', port=port)
