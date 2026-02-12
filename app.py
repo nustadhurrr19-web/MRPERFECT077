@@ -10,17 +10,17 @@ from flask import Flask, render_template_string, jsonify
 # ⚙️ CONFIGURATION
 # ==========================================
 API_URL = "https://api-iok6.onrender.com/api/get_history"
-SESSION_TARGET = 10  # Wins needed to reset session
+SESSION_TARGET = 10 
 app = Flask(__name__)
 
 # ==========================================
-# 🧠 TITAN V6: PRECISION BRAIN
+# 🧠 TITAN V8: TURBO SYNC
 # ==========================================
 class TitanBrain:
     def __init__(self):
         self.history = []
         
-        # --- Session Stats (Reset every 10 wins) ---
+        # --- Session Stats ---
         self.session_wins = 0
         self.wins = 0
         self.losses = 0
@@ -30,16 +30,16 @@ class TitanBrain:
         self.max_loss_streak = 0
         
         # --- Logic State ---
-        self.level = 1  # 1, 2, or 3
-        self.state = "NORMAL"  # NORMAL, GHOST_ANALYSIS
+        self.level = 1 
+        self.state = "NORMAL" 
         self.ghost_turns_left = 0
         self.last_prediction = None
         self.active_bet_type = "REAL" 
         
-        # --- MATH ENGINE (Markov Order-3) ---
+        # --- MATH ENGINE ---
         self.markov_table = defaultdict(lambda: {'BIG': 0, 'SMALL': 0})
 
-        # --- PATTERN ENGINE (The Full 17) ---
+        # --- PATTERN ENGINE ---
         self.patterns = {
             "11111": 1, "00000": 0, "10101": 0, "01010": 1,
             "11001": 0, "00110": 1, "11100": 0, "00011": 1,
@@ -53,7 +53,6 @@ class TitanBrain:
     def get_size_str(self, s): return "BIG" if s == 1 else "SMALL"
 
     def reset_session(self):
-        """Resets all stats for the new session"""
         self.wins = 0
         self.losses = 0
         self.current_win_streak = 0
@@ -65,20 +64,48 @@ class TitanBrain:
         self.state = "NORMAL"
 
     def sync_data(self):
+        """TURBO SYNC: Tries to fetch 1000 records at once"""
         try:
+            print("🚀 ATTEMPTING TURBO FETCH (1000 RECORDS)...")
             all_data = []
-            for p in range(1, 40): 
-                r = requests.get(API_URL, params={"size": "20", "pageNo": str(p)}, timeout=4)
+            
+            # 1. TRY MASSIVE FETCH
+            try:
+                r = requests.get(API_URL, params={"size": "1000", "pageNo": "1"}, timeout=5)
                 if r.status_code == 200:
                     d = r.json().get('data', {}).get('list', [])
-                    if not d: break
-                    all_data.extend(d)
-            all_data.sort(key=lambda x: int(x['issueNumber']))
+                    if len(d) > 100:
+                        # SUCCESS! Server allowed big fetch
+                        print(f"✅ TURBO SUCCESS! Loaded {len(d)} records instantly.")
+                        all_data = d
+                    else:
+                        print("⚠️ SERVER LIMIT DETECTED. Switching to Loop Mode...")
+                        # Server ignored '1000' and gave small amount. Fallback to loop.
+                        all_data = [] # Reset to fetch properly
+            except:
+                print("⚠️ TURBO FAILED. Switching to Loop Mode...")
+
+            # 2. FALLBACK LOOP (If Turbo failed or returned < 100 items)
+            if not all_data:
+                for p in range(1, 40): 
+                    r = requests.get(API_URL, params={"size": "50", "pageNo": str(p)}, timeout=3)
+                    if r.status_code == 200:
+                        d = r.json().get('data', {}).get('list', [])
+                        if not d: break
+                        all_data.extend(d)
             
+            if not all_data: return False
+
+            # Sort and Store
+            all_data.sort(key=lambda x: int(x['issueNumber']))
             self.history = [{'n': int(i['number']), 's': self.get_size(i['number']), 'id': str(i['issueNumber'])} for i in all_data]
+            
+            # Train Math Engine immediately
             self.train_markov()
             return True
-        except: return False
+        except Exception as e: 
+            print(f"Sync Error: {e}")
+            return False
 
     def train_markov(self):
         self.markov_table.clear()
@@ -116,37 +143,46 @@ class TitanBrain:
         
         # 2. STATE LOGIC
         if self.state == "GHOST_ANALYSIS":
-            return None, f"🛡️ ANALYZING TREND ({self.ghost_turns_left})", False
+            return None, f"🛡️ ANALYZING ({self.ghost_turns_left})", False
 
-        # 3. LEVEL LOGIC (STRICT)
+        # 3. BALANCED LEVEL LOGIC
         if self.level == 1:
-            # LEVEL 1: Standard (Safe Entry)
+            # LEVEL 1: Active Entry
             if pat_pred is not None:
                 final_pred = pat_pred
                 algo_type = "LVL 1 | PATTERN"
-            elif math_pred is not None and math_conf > 0.60:
+            elif math_pred is not None and math_conf > 0.55:
                 final_pred = math_pred
                 algo_type = f"LVL 1 | MATH ({int(math_conf*100)}%)"
+            elif math_pred is not None:
+                 final_pred = math_pred
+                 algo_type = "LVL 1 | MATH FLOW"
                 
         elif self.level == 2:
-            # LEVEL 2: STRICT (Agree + 75% Conf)
+            # LEVEL 2: Agreement or Strong Math
             if pat_pred is not None and math_pred is not None:
-                if pat_pred == math_pred and math_conf >= 0.75:
+                if pat_pred == math_pred:
                     final_pred = pat_pred
-                    algo_type = f"LVL 2 | STRONG ({int(math_conf*100)}%)"
+                    algo_type = f"LVL 2 | HYBRID AGREE"
+                elif math_conf >= 0.70:
+                    final_pred = math_pred
+                    algo_type = f"LVL 2 | MATH POWER"
                 else:
-                    return None, "⛔ LVL 2 WAIT (NEED 75% + AGREE)", False
+                    return None, "⛔ LVL 2 CONFLICT", False
+            elif math_pred is not None and math_conf >= 0.70:
+                 final_pred = math_pred
+                 algo_type = f"LVL 2 | MATH POWER"
             else:
                 return None, "⛔ LVL 2 WAITING...", False
                 
         elif self.level == 3:
-            # LEVEL 3: SNIPER (Agree + 85% Conf)
+            # LEVEL 3: SNIPER (75% Conf)
             if pat_pred is not None and math_pred is not None:
-                if pat_pred == math_pred and math_conf >= 0.85:
+                if pat_pred == math_pred and math_conf >= 0.75:
                     final_pred = pat_pred
                     algo_type = f"🔥 LVL 3 | SNIPER ({int(math_conf*100)}%)"
                 else:
-                    return None, "⛔ LVL 3 WAIT (NEED 85% + AGREE)", False
+                    return None, "⛔ LVL 3 WAIT (NEED 75% + AGREE)", False
             else:
                 return None, "⛔ LVL 3 WAITING...", False
 
@@ -180,7 +216,6 @@ def background_worker():
             real_res = engine.get_size(data['number']) 
             
             if curr_pid != last_pid:
-                # --- PROCESS ROUND ---
                 is_win = False
                 status_txt = "SKIP"
                 
@@ -189,50 +224,37 @@ def background_worker():
                 engine.train_markov()
                 if len(engine.history) > 1000: engine.history.pop(0)
 
-                # CHECK BET RESULT
+                # CHECK BET
                 if engine.last_prediction is not None:
                     is_win = (engine.last_prediction == real_res)
                     
                     if engine.active_bet_type == "REAL":
                         if is_win:
-                            # WIN LOGIC
                             engine.wins += 1
                             engine.session_wins += 1
                             engine.current_win_streak += 1
                             engine.current_loss_streak = 0
-                            
                             if engine.current_win_streak > engine.max_win_streak:
                                 engine.max_win_streak = engine.current_win_streak
-                            
-                            engine.level = 1 # Reset to Level 1
+                            engine.level = 1 
                             status_txt = "WIN"
-                            
                             if engine.session_wins >= SESSION_TARGET:
                                 engine.reset_session()
                                 status_txt = "WIN (SESSION RESET)"
-                                
                         else:
-                            # LOSS LOGIC
                             engine.losses += 1
                             engine.current_loss_streak += 1
                             engine.current_win_streak = 0
-                            
                             if engine.current_loss_streak > engine.max_loss_streak:
                                 engine.max_loss_streak = engine.current_loss_streak
-                            
                             status_txt = "LOSS"
-                            
-                            # ESCALATION
-                            if engine.level == 1:
-                                engine.level = 2
+                            if engine.level == 1: engine.level = 2
                             elif engine.level == 2:
-                                # Level 2 Lost -> GHOST (Skip 3)
                                 engine.state = "GHOST_ANALYSIS"
                                 engine.ghost_turns_left = 3
-                                engine.level = 3 # Next is Level 3
+                                engine.level = 3 
                                 status_txt = "LOSS (GHOST TRIGGER)"
                             elif engine.level == 3:
-                                # Level 3 Lost -> GHOST (Skip 5) -> Reset
                                 engine.level = 1
                                 engine.state = "GHOST_ANALYSIS"
                                 engine.ghost_turns_left = 5
@@ -245,7 +267,6 @@ def background_worker():
                             engine.state = "NORMAL"
                             engine.active_bet_type = "REAL"
 
-                # Log History
                 if engine.last_prediction is not None or "TRIGGER" in status_txt:
                     mode_tag = "REAL" if engine.active_bet_type == "REAL" else "GHOST"
                     global_state["history"].insert(0, {
@@ -256,21 +277,16 @@ def background_worker():
                     })
                     global_state["history"] = global_state["history"][:20]
 
-                # --- PREDICT NEXT ---
                 pred, algo, is_valid = engine.analyze()
                 engine.last_prediction = pred
                 
-                # Determine Bet Type
                 if engine.state == "GHOST_ANALYSIS":
                     engine.active_bet_type = "GHOST"
-                    # During Ghost, if prediction is None (Wait), we keep waiting
                 else:
                     engine.active_bet_type = "REAL"
 
-                # UI Display
                 d_pred = "--"
                 d_type = algo
-                
                 if pred is not None:
                     if engine.active_bet_type == "REAL":
                         d_pred = engine.get_size_str(pred)
@@ -310,7 +326,7 @@ HTML = """
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TITAN V6 PRECISION</title>
+<title>TITAN V8 TURBO</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;800&display=swap" rel="stylesheet">
 <style>
     :root { --bg: #050505; --card: #111; --text: #fff; --accent: #6366f1; --win: #00ff88; --loss: #ff0055; }
@@ -341,7 +357,7 @@ HTML = """
     <div class="container">
         <div class="card">
             <div class="header">
-                <div class="title">TITAN V6</div>
+                <div class="title">TITAN V8</div>
                 <div style="font-size:12px; color:#666;">PERIOD: <span id="p">...</span></div>
             </div>
             <div class="stats-row">
@@ -389,7 +405,7 @@ HTML = """
             pEl.innerText = d.prediction;
             pEl.className = d.prediction === "BIG" ? "big" : d.prediction === "SMALL" ? "small" : "wait";
             aEl.innerText = d.type;
-            if(d.type.includes("WAIT")) aEl.style.color = "#ffaa00";
+            if(d.type.includes("WAIT") || d.type.includes("ANALYZING")) aEl.style.color = "#ffaa00";
             else aEl.style.color = "#aaa";
             document.getElementById('hist').innerHTML = d.history.map(h => {
                 let cls = "hist-ghost";
@@ -410,4 +426,3 @@ def status(): return jsonify(global_state)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5003)))
-
