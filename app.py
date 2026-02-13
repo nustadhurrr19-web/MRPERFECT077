@@ -9,19 +9,19 @@ from datetime import datetime
 import numpy as np
 
 # ==========================================
-# ⚙️ CONFIGURATION 
+# ⚙️ CONFIGURATION - FRESH DATA ONLY
 # ==========================================
 API_URL = "https://api-iok6.onrender.com/api/get_history"
-HISTORY_LIMIT = 2000
+FRESH_HISTORY_LIMIT = 500  # ONLY LAST 500 - FRESH DATA
 BANKROLL = 10000.0
 app = Flask(__name__)
 
 # ==========================================
-# 🧠 TITAN BRAIN V3.0 - ULTIMATE ACCURACY
+# 🧠 TITAN BRAIN V3.1 - FRESH DATA + LOSS RECOVERY
 # ==========================================
 class TitanBrain:
     def __init__(self):
-        self.history = deque(maxlen=HISTORY_LIMIT)
+        self.history = deque(maxlen=FRESH_HISTORY_LIMIT)  # FRESH 500 ONLY
         self.bankroll = BANKROLL
         self.wins = 0
         self.losses = 0
@@ -37,17 +37,12 @@ class TitanBrain:
         self.pat_size = self.get_patterns()
         self.pat_color = self.get_patterns()
         
-        # KALMAN FILTER (SMOOTHING)
+        # KALMAN FILTER
         self.kalman_size_prob = 0.5
         self.kalman_color_prob = 0.5
         
         # PERFORMANCE TRACKING
         self.score_performance = defaultdict(lambda: {'wins': 0, 'total': 0})
-        self.recent_win_rate = 0.5
-        
-        # REGIME DETECTION
-        self.regime = "MEAN"
-        self.volatility = 0.5
         
     def get_patterns(self):
         return {
@@ -57,66 +52,44 @@ class TitanBrain:
             "11101": 0, "00010": 1, "10001": 0, "01110": 1
         }
     
-    def get_size_val(self, n): 
-        return 1 if int(n) >= 5 else 0
-    
-    def get_size_str(self, s): 
-        return "BIG" if s == 1 else "SMALL"
-    
+    def get_size_val(self, n): return 1 if int(n) >= 5 else 0
+    def get_size_str(self, s): return "BIG" if s == 1 else "SMALL"
     def get_color_val(self, n): 
         n = int(n)
         return 1 if n in [1, 3, 5, 7, 9] else 0
-    
-    def get_color_str(self, c): 
-        return "GREEN" if c == 1 else "RED"
+    def get_color_str(self, c): return "GREEN" if c == 1 else "RED"
     
     def get_bet_size(self, level):
         factors = {"SURESHOT": 0.03, "HIGH": 0.02, "GOOD": 0.01, "LOW": 0}
         return self.bankroll * factors.get(level, 0)
     
-    # === STRATEGY 1: ENSEMBLE VOTING ===
+    # === ENSEMBLE VOTING ===
     def analyze_ensemble(self, mode):
         hist_list = list(self.history)
-        if len(hist_list) < 5: 
-            return 0, 1.0
+        if len(hist_list) < 5: return 0, 1.0
         
-        # Predictor 1: PATTERN (last 5)
+        # Pattern
         seq = ''.join(str(x[mode]) for x in hist_list[-5:])
         p1 = self.pat_size.get(seq, 0.5)
         
-        # Predictor 2: MARKOV 3-gram
+        # Markov
         last3 = tuple(hist_list[-3:][j][mode] for j in range(3))
         target_markov = self.markov_size if mode == 's_val' else self.markov_color
         p2 = 0.5
         if last3 in target_markov:
             s = target_markov[last3]
-            tot = s['BIG'] + s['SMALL'] if mode == 's_val' else s['GREEN'] + s['RED']
-            if tot > 0:
-                p2 = (s['BIG'] if mode == 's_val' else s['GREEN']) / tot
+            tot = sum(s.values())
+            if tot > 0: p2 = s['BIG']/tot if mode == 's_val' else s['GREEN']/tot
         
-        # Predictor 3: MOMENTUM (last 3 trend)
+        # Momentum
         recent = [x[mode] for x in hist_list[-3:]]
         p3 = sum(recent) / 3.0
         
-        # VOTE: Weighted average
         ensemble_pred = (p1 * 0.4 + p2 * 0.4 + p3 * 0.2)
-        strength = min(4.0, (abs(ensemble_pred - 0.5) * 8))  # Convert to score
-        
+        strength = min(4.0, abs(ensemble_pred - 0.5) * 8)
         return 1 if ensemble_pred > 0.5 else 0, strength
     
-    # === STRATEGY 2: REGIME DETECTION ===
-    def detect_market_regime(self):
-        if len(self.history) < 20: return "MEAN"
-        
-        recent = list(self.history)[-20:]
-        size_changes = sum(abs(recent[i]['s_val'] - recent[i-1]['s_val']) for i in range(1, 20))
-        self.volatility = size_changes / 19.0
-        
-        if self.volatility > 0.65: return "RANDOM"
-        elif self.volatility < 0.35: return "TREND"
-        else: return "MEAN"
-    
-    # === STRATEGY 3: KALMAN FILTER ===
+    # === KALMAN FILTER ===
     def update_kalman(self, mode, actual_val):
         gain = 0.15
         if mode == 's_val':
@@ -126,47 +99,28 @@ class TitanBrain:
             error = actual_val - self.kalman_color_prob
             self.kalman_color_prob += gain * error
     
-    # === STRATEGY 4: CONFIDENCE CALIBRATION ===
-    def get_calibrated_conf(self, raw_score):
-        if self.score_performance[raw_score]['total'] < 10:
-            return raw_score / 4.0
-        wins = self.score_performance[raw_score]['wins']
-        total = self.score_performance[raw_score]['total']
-        return wins / total
-    
-    # === STRATEGY 5: ADAPTIVE THRESHOLD ===
-    def get_adaptive_threshold(self):
-        total_bets = self.wins + self.losses
-        if total_bets < 10: return 1.2
-        
-        recent_win_rate = self.wins / total_bets if total_bets > 0 else 0.5
-        
-        if recent_win_rate > 0.65: return 1.0  # Aggressive
-        elif recent_win_rate < 0.40: return 2.0  # Conservative
-        else: return 1.5  # Balanced
-    
     def sync_data(self):
         try:
             all_data = []
-            r = requests.get(API_URL, params={"size": str(HISTORY_LIMIT), "pageNo": "1"}, timeout=5)
+            r = requests.get(API_URL, params={"size": str(FRESH_HISTORY_LIMIT), "pageNo": "1"}, timeout=5)
             if r.status_code == 200:
                 data = r.json().get('data', {}).get('list', [])
                 if len(data) > 100: all_data = data
             
-            if not all_data:
-                for p in range(1, 15):
+            if not all_
+                for p in range(1, 11):  # Max 10 pages for 500
                     r = requests.get(API_URL, params={"size": "50", "pageNo": str(p)}, timeout=3)
                     if r.status_code == 200:
                         data = r.json().get('data', {}).get('list', [])
-                        if not data: break
+                        if not  break
                         all_data.extend(data)
-                        if len(all_data) > HISTORY_LIMIT: break
+                        if len(all_data) > FRESH_HISTORY_LIMIT: break
             
-            if not all_data: return False
+            if not all_ return False
             
             all_data.sort(key=lambda x: int(x['issueNumber']))
             self.history.clear()
-            for item in all_data:
+            for item in all_data[-FRESH_HISTORY_LIMIT:]:  # LAST 500 ONLY
                 n = int(item['number'])
                 self.history.append({
                     'n': n, 'id': str(item['issueNumber']),
@@ -184,29 +138,22 @@ class TitanBrain:
         
         hist_list = list(self.history)
         for i in range(3, len(hist_list)):
-            # SIZE MARKOV
             ps = tuple(hist_list[j]['s_val'] for j in range(i-3, i))
             rs = 'BIG' if hist_list[i]['s_val'] == 1 else 'SMALL'
             self.markov_size[ps][rs] += 1
             
-            # COLOR MARKOV
             pc = tuple(hist_list[j]['c_val'] for j in range(i-3, i))
             rc = 'GREEN' if hist_list[i]['c_val'] == 1 else 'RED'
             self.markov_color[pc][rc] += 1
     
     def get_best_bet(self):
-        # REGIME DETECTION
-        self.regime = self.detect_market_regime()
-        
-        # ENSEMBLE PREDICTIONS
         s_pred, s_strength = self.analyze_ensemble('s_val')
         c_pred, c_strength = self.analyze_ensemble('c_val')
         
-        # KALMAN BIAS
+        # Kalman bias
         s_final = s_pred * self.kalman_size_prob + (1-s_pred) * (1-self.kalman_size_prob)
         c_final = c_pred * self.kalman_color_prob + (1-c_pred) * (1-self.kalman_color_prob)
         
-        # SELECT BEST
         if c_strength * c_final > s_strength * s_final:
             raw_score = c_strength
             final_target = self.get_color_str(c_pred)
@@ -216,37 +163,33 @@ class TitanBrain:
             final_target = self.get_size_str(s_pred)
             final_type = "SIZE"
         
-        # ADAPTIVE LEVELS - MINIMAL SKIPS!
-        cal_conf = self.get_calibrated_conf(raw_score)
-        regime_adjust = 0.5 if self.regime == "RANDOM" else 0
-        
-        if raw_score >= 3.0 + regime_adjust: final_level = "SURESHOT"
-        elif raw_score >= 2.0 + regime_adjust: final_level = "HIGH"
-        elif raw_score >= 1.2 + regime_adjust: final_level = "GOOD"  # VERY LOW THRESHOLD
+        # 3-TIER: NO SKIPS NEEDED
+        if raw_score >= 3.0: final_level = "SURESHOT"
+        elif raw_score >= 2.0: final_level = "HIGH"
+        elif raw_score >= 1.2: final_level = "GOOD"
         else: final_level = "LOW"
         
         return final_target, final_type, final_level, raw_score
     
     def update_performance(self, raw_score, win):
-        self.score_performance[raw_score]['total'] += 1
-        if win:
-            self.score_performance[raw_score]['wins'] += 1
+        self.score_performance[round(raw_score,1)]['total'] += 1
+        if win: self.score_performance[round(raw_score,1)]['wins'] += 1
     
     def reset_session(self):
         self.wins = 0
         self.losses = 0
         self.session_wins = 0
         self.consecutive_losses = 0
-        print(">>> SESSION RESET: 10 WINS - HISTORY + MODELS PRESERVED <<<")
+        print(">>> SESSION RESET - FRESH 500 DATA PRESERVED <<<")
 
 # ==========================================
-# 🔄 ULTIMATE WORKER - NO WAITING!
+# 🔄 V3.1 WORKER - FIXED LOSS RECOVERY
 # ==========================================
 bot = TitanBrain()
 state = {
     "period": "...", "pred": "--", "type": "...", "level": "LOW",
     "wins": 0, "losses": 0, "session": 0, "history": [],
-    "bankroll": BANKROLL, "bet_size": 0, "regime": "MEAN"
+    "bankroll": BANKROLL, "bet_size": 0
 }
 
 def worker():
@@ -256,27 +199,19 @@ def worker():
             if not bot.history:
                 bot.sync_data()
             
-            # ROBUST API CALL
-            try:
-                r = requests.get(API_URL, params={"size": "1", "pageNo": "1"}, timeout=4)
-                if r.status_code != 200: 
-                    time.sleep(3)
-                    continue
-                data = r.json()
-                if not data.get('data', {}).get('list'):
-                    time.sleep(3)
-                    continue
-                d = data['data']['list'][0]
-            except:
-                time.sleep(3)
-                continue
+            r = requests.get(API_URL, params={"size": "1", "pageNo": "1"}, timeout=4)
+            if r.status_code != 200: 
+                time.sleep(3); continue
+            data = r.json()
+            if not data.get('data', {}).get('list'):
+                time.sleep(3); continue
+            d = data['data']['list'][0]
             
             cid = str(d['issueNumber'])
             n = int(d['number'])
             
             if cid != last_id:
-                # 1. CHECK PREVIOUS RESULT + KALMAN UPDATE
-                real = None
+                # 1. CHECK RESULT + KALMAN
                 status = "WAIT"
                 if bot.last_pred and bot.last_pred != "SKIP":
                     win = False
@@ -292,51 +227,54 @@ def worker():
                     
                     bet_amt = state.get('bet_size', 0)
                     if win:
-                        bot.bankroll += bet_amt  # 1:1 payout
+                        bot.bankroll += bet_amt
                         bot.wins += 1
                         bot.session_wins += 1
                         bot.consecutive_losses = 0
                         status = "WIN"
-                        bot.update_performance(bot.last_conf, True)
+                        bot.update_performance(2.5, True)  # Average GOOD score
                     else:
                         bot.bankroll -= bet_amt
                         bot.losses += 1
                         bot.consecutive_losses += 1
                         status = "LOSS"
-                        bot.update_performance(bot.last_conf, False)
+                        bot.update_performance(2.5, False)
                 
-                # UI HISTORY
+                # UI
                 state["history"].insert(0, {
                     "p": cid[-4:],
                     "r": f"{real} [{bot.last_type[0]}]" if 'real' in locals() else "--",
-                    "s": status, 
-                    "l": bot.last_conf
+                    "s": status, "l": bot.last_conf
                 })
                 state["history"] = state["history"][:20]
                 
-                # 2. SESSION RESET (KEEP EVERYTHING!)
+                # 2. RESET
                 if bot.session_wins >= 10:
                     bot.reset_session()
                     state["history"] = []
                     state["history"].insert(0, {"p": "RESET", "r": "10WINS!", "s": "DONE", "l": "SUCCESS"})
                 
-                # 3. UPDATE DATA + TRAIN
+                # 3. FRESH DATA UPDATE
                 bot.history.append({
                     'n': n, 'id': cid,
-                    's_val': bot.get_size_val(n), 
-                    'c_val': bot.get_color_val(n)
+                    's_val': bot.get_size_val(n), 'c_val': bot.get_color_val(n)
                 })
-                bot.train_engines()
+                bot.train_engines()  # RETRAIN ON FRESH 500 ONLY
                 
-                # 4. ULTRA-AGGRESSIVE BETTING - NO 20-MIN WAITS!
-                required_score = bot.get_adaptive_threshold()  # Dynamic: 1.0-2.0
+                # 4. V3.1 FIXED THRESHOLD - NO LOSS SPIRAL
+                base_thresh = 1.2  # GOOD LEVEL ALWAYS
+                if bot.consecutive_losses >= 4:
+                    required_score = base_thresh + 0.3  # 1.5 MAX
+                elif bot.session_wins >= 7:
+                    required_score = base_thresh - 0.2  # 1.0 FINISH STRONG
+                else:
+                    required_score = base_thresh  # 1.2 NORMAL
+                
                 pred, p_type, level, raw_score = bot.get_best_bet()
                 bet_size = bot.get_bet_size(level)
                 next_period = str(int(cid) + 1)
                 
-                state["regime"] = bot.regime
-                
-                # BET ON ALMOST EVERYTHING (95% BET RATE)
+                # 95% BET RATE - NO WAITING
                 if raw_score >= required_score and bet_size > 0:
                     bot.last_pred = pred
                     bot.last_type = p_type
@@ -349,7 +287,6 @@ def worker():
                         "bet_size": round(bet_size, 0)
                     })
                 else:
-                    # RARE SKIP - Only true LOW confidence
                     bot.last_pred = "SKIP"
                     bot.last_type = "NONE"
                     bot.last_conf = "LOW"
@@ -369,11 +306,10 @@ def worker():
             print(f"Error: {e}")
             time.sleep(3)
 
-# START WORKER
 threading.Thread(target=worker, daemon=True).start()
 
 # ==========================================
-# 🌐 ULTIMATE UI V3.0
+# 🌐 UI V3.1
 # ==========================================
 HTML = """
 <!DOCTYPE html>
@@ -381,15 +317,14 @@ HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>TITAN V3.0 ULTIMATE</title>
+    <title>TITAN V3.1 - FRESH 500 + LOSS FIX</title>
     <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;700&display=swap" rel="stylesheet">
     <style>
-        :root { --bg: #000; --card: #111; --text: #fff; --green: #00e676; --red: #ff1744; --blue: #2979ff; --yellow: #ffeb3b; --orange: #ff9100; --purple: #d500f9; }
+        :root { --bg: #000; --card: #111; --text: #fff; --green: #00e676; --red: #ff1744; --blue: #2979ff; --yellow: #ffeb3b; --orange: #ff9100; }
         body { background: var(--bg); color: var(--text); font-family: 'Oswald', sans-serif; margin: 0; padding: 15px; text-align: center; text-transform: uppercase; }
         .container { max-width: 500px; margin: 0 auto; }
         .card { background: var(--card); border: 1px solid #222; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
         .score-row { display: flex; justify-content: space-between; font-size: 20px; margin-bottom: 5px; border-bottom: 1px solid #222; padding-bottom: 10px; }
-        .session-row { font-size: 14px; color: #888; margin-bottom: 15px; }
         .w { color: var(--green); } .l { color: var(--red); }
         .pred-box { margin: 20px 0; min-height: 120px; display: flex; flex-direction: column; justify-content: center; align-items: center; }
         .type-badge { font-size: 14px; color: #666; letter-spacing: 2px; margin-bottom: 5px; }
@@ -402,8 +337,7 @@ HTML = """
         .lvl-WAIT { background: #333; color: #777; }
         .lvl-GOOD { background: var(--blue); }
         .lvl-HIGH { background: var(--green); }
-        .lvl-SURESHOT { background: var(--purple); color: #fff; animation: pulse 0.5s infinite; }
-        .regime { font-size: 12px; color: var(--yellow); }
+        .lvl-SURESHOT { background: var(--yellow); color: #000; animation: pulse 0.5s infinite; }
         .bankroll { font-size: 18px; color: var(--yellow); }
         .row { display: flex; justify-content: space-between; padding: 12px; background: #0a0a0a; border-radius: 6px; margin-bottom: 5px; align-items: center; border-left: 4px solid #333; }
         .row.WIN { border-left-color: var(--green); } .row.LOSS { border-left-color: var(--red); } .row.DONE { border-left-color: var(--yellow); }
@@ -413,21 +347,14 @@ HTML = """
 <body>
     <div class="container">
         <div class="card">
-            <div class="score-row">
-                <span>TITAN V3.0 ULTIMATE</span>
-                <span id="bankroll" class="bankroll">₹10,000</span>
-            </div>
+            <div class="score-row"><span>TITAN V3.1 FRESH 500</span><span id="bankroll" class="bankroll">₹10,000</span></div>
             <div><span class="w" id="w">W:0</span> <span class="l" id="l">L:0</span></div>
-            <div class="session-row">SESSION <span id="sess" style="color:#fff;font-weight:bold;">0/10</span></div>
-            <div style="font-size:12px;color:#666;">
-                PERIOD <span id="p" style="color:#fff;">...</span> | BET ₹<span id="bet">0</span>
-            </div>
-            <div class="regime" id="regime">REGIME: MEAN</div>
+            <div style="font-size:12px;color:#666;">PERIOD <span id="p" style="color:#fff;">...</span> | BET ₹<span id="bet">0</span></div>
         </div>
         
         <div class="card">
             <div class="pred-box">
-                <div id="type" class="type-badge">ENSEMBLE SCAN...</div>
+                <div id="type" class="type-badge">FRESH DATA SCAN...</div>
                 <div id="pred" class="val-BIG">--</div>
                 <div style="margin-top:15px;"><span id="lvl" class="conf-badge lvl-WAIT">WAIT</span></div>
             </div>
@@ -445,23 +372,21 @@ HTML = """
                 document.getElementById('p').innerText = d.period;
                 document.getElementById('w').innerText = `W:${d.wins}`;
                 document.getElementById('l').innerText = `L:${d.losses}`;
-                document.getElementById('sess').innerText = `${d.session}/10`;
                 document.getElementById('bankroll').innerText = `₹${d.bankroll}`;
                 document.getElementById('bet').innerText = d.bet_size;
-                document.getElementById('regime').innerText = `REGIME: ${d.regime}`;
                 
                 let pEl = document.getElementById('pred');
                 let tEl = document.getElementById('type');
                 let lEl = document.getElementById('lvl');
                 
                 if (d.pred === 'SKIP') {
-                    tEl.innerText = 'LOW CONFIDENCE';
+                    tEl.innerText = 'LOW SIGNAL';
                     pEl.innerText = 'SKIPPING';
                     pEl.className = 'val-SKIP';
-                    lEl.innerText = 'WAITING BET';
+                    lEl.innerText = 'WAIT';
                     lEl.className = 'conf-badge lvl-WAIT';
                 } else {
-                    tEl.innerText = `${d.type} ENSEMBLE`;
+                    tEl.innerText = `${d.type} FRESH`;
                     pEl.innerText = d.pred;
                     pEl.className = `val-${d.pred}`;
                     lEl.innerText = d.level;
@@ -485,17 +410,15 @@ HTML = """
 """
 
 @app.route('/')
-def home():
-    return render_template_string(HTML)
+def home(): return render_template_string(HTML)
 
 @app.route('/api/status')
-def status():
-    return jsonify(state)
+def status(): return jsonify(state)
 
 if __name__ == '__main__':
     if not os.path.exists('trades.csv'):
         with open('trades.csv', 'w') as f:
             f.write('timestamp,pred,actual,level,bet,pnl,bankroll\n')
     
-    port = int(os.environ.get('PORT', 5001))
+    port = int(os.environ.get('PORT', 5003))
     app.run(host='0.0.0.0', port=port, debug=False)
