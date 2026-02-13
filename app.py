@@ -12,7 +12,7 @@ import numpy as np
 # ⚙️ CONFIGURATION - FRESH DATA ONLY
 # ==========================================
 API_URL = "https://api-iok6.onrender.com/api/get_history"
-FRESH_HISTORY_LIMIT = 500
+FRESH_HISTORY_LIMIT = 200
 BANKROLL = 10000.0
 app = Flask(__name__)
 
@@ -459,3 +459,4 @@ if __name__ == '__main__':
     
     port = int(os.environ.get('PORT', 5003))
     app.run(host='0.0.0.0', port=port, debug=False)
+
