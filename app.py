@@ -1,405 +1,455 @@
 import requests
 import time
 import threading
-import os
-from collections import defaultdict, deque
+import logging
+from collections import deque, Counter, defaultdict
 from flask import Flask, render_template_string, jsonify
-import numpy as np
 
 # ==========================================
-# CONFIGURATION
+# TITAN V15 PRO - DASHBOARD EDITION
 # ==========================================
+
+# --- CONFIGURATION ---
 API_URL = "https://api-iok6.onrender.com/api/get_history"
-FRESH_HISTORY_LIMIT = 100
-BANKROLL = 10000.0
+HISTORY_SIZE = 3000       
+INITIAL_BANKROLL = 10000.0
+BASE_BET = 50.0
+
+# --- LOGIC THRESHOLDS ---
+MIN_PATTERN_CONF = 0.60   # Deep Search must be at least 60% sure
+MIN_MARKOV_CONF = 0.50    # Markov must just agree (>50%)
+
+# --- LOGGING ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+logger = logging.getLogger()
 app = Flask(__name__)
 
 # ==========================================
-# TITAN BRAIN V4.0 - PURE SIZE SPECIALIST
+# 1. MONEY MANAGER (Martingale)
 # ==========================================
-class TitanBrain:
-    def __init__(self):
-        self.history = deque(maxlen=FRESH_HISTORY_LIMIT)
-        self.bankroll = BANKROLL
-        self.wins = 0
-        self.losses = 0
-        self.session_wins = 0
-        self.consecutive_losses = 0
-        self.consecutive_wins = 0
-        self.last_pred = None
-        self.last_type = "SIZE"
-        self.last_conf = "LOW"
-        # Only tracking Size Markov chains now
-        self.markov_size = defaultdict(lambda: {'BIG': 0, 'SMALL': 0})
-        self.pat_size = self.get_patterns()
-        self.kalman_size_prob = 0.5
-        self.score_performance = defaultdict(lambda: {'wins': 0, 'total': 0})
+class MoneyManager:
+    def __init__(self, bankroll):
+        self.bankroll = bankroll
+        self.level = 1
+        self.current_bet_amount = 0.0
 
-    def get_patterns(self):
-        # Weighted pattern map for Size (Big/Small)
-        return {
-            "11111": 0.9, "00000": 0.1, "10101": 0.2, "01010": 0.8,
-            "11001": 0.3, "00110": 0.7, "11100": 0.2, "00011": 0.8,
-            "10010": 0.8, "01101": 0.2, "11011": 0.2, "00100": 0.8,
-            "11101": 0.2, "00010": 0.8, "10001": 0.2, "01110": 0.8
+    def get_bet(self, confidence, is_agreed):
+        # 1. Calculate Martingale Amount (50, 100, 200...)
+        calculated_bet = BASE_BET * (2 ** (self.level - 1))
+        if calculated_bet > self.bankroll: calculated_bet = self.bankroll
+
+        # 2. DECISION GATE
+        # We only place the bet if the engines AGREE.
+        if is_agreed and self.bankroll > 0:
+            self.current_bet_amount = calculated_bet
+            return calculated_bet
+        else:
+            return 0.0 # SKIP
+
+    def update_result(self, won):
+        if self.current_bet_amount == 0: return
+        if won:
+            profit = self.current_bet_amount * 0.98
+            self.bankroll += profit
+            self.level = 1 
+        else:
+            self.bankroll -= self.current_bet_amount
+            self.level += 1
+
+# ==========================================
+# 2. DEEP PATTERN ENGINE
+# ==========================================
+class DeepPatternEngine:
+    def __init__(self):
+        self.data = [] 
+
+    def add(self, item):
+        self.data.append(item)
+        if len(self.data) > HISTORY_SIZE: self.data.pop(0)
+
+    def analyze(self):
+        if len(self.data) < 50: return "WAIT", 0.0
+
+        history_str = "".join([x['res'][0] for x in self.data]) 
+        
+        # Check patterns length 6 down to 3
+        for depth in range(6, 2, -1):
+            pattern = history_str[-depth:]
+            matches = []
+            start = 0
+            while True:
+                idx = history_str.find(pattern, start, len(history_str) - 1)
+                if idx == -1: break
+                matches.append(history_str[idx + depth])
+                start = idx + 1
+
+            if len(matches) < 3: continue 
+
+            counts = Counter(matches) 
+            top = counts.most_common(1)[0]
+            
+            pred = "BIG" if top[0] == 'B' else "SMALL"
+            conf = top[1] / len(matches)
+            return pred, conf
+            
+        return "WAIT", 0.0
+
+# ==========================================
+# 3. MARKOV ENGINE
+# ==========================================
+class MarkovEngine:
+    def __init__(self):
+        self.chains = defaultdict(lambda: {'B': 0, 'S': 0})
+        self.raw_history = []
+
+    def train(self, history_items):
+        self.chains.clear()
+        self.raw_history = [x['res'][0] for x in history_items]
+        for i in range(3, len(self.raw_history)):
+            prev_3 = "".join(self.raw_history[i-3:i])
+            actual = self.raw_history[i]
+            self.chains[prev_3][actual] += 1
+
+    def analyze(self):
+        if len(self.raw_history) < 5: return "WAIT", 0.0
+        
+        current_seq = "".join(self.raw_history[-3:])
+        stats = self.chains.get(current_seq)
+        
+        if not stats or (stats['B'] + stats['S'] == 0): return "WAIT", 0.0
+            
+        total = stats['B'] + stats['S']
+        prob_b = stats['B'] / total
+        prob_s = stats['S'] / total
+        
+        return ("BIG", prob_b) if prob_b > prob_s else ("SMALL", prob_s)
+
+# ==========================================
+# 4. SYSTEM CONTROLLER
+# ==========================================
+class TitanSystem:
+    def __init__(self):
+        self.engine_A = DeepPatternEngine()
+        self.engine_B = MarkovEngine()
+        self.bank = MoneyManager(INITIAL_BANKROLL)
+        
+        self.curr_issue = "Loading..."
+        self.prediction = "WAIT"
+        self.bet_val = 0.0
+        self.status = "INIT"
+        
+        self.ui_data = {
+            "p1": "--", "c1": 0, "p2": "--", "c2": 0,
+            "agreement": "NO",
+            "last_win": "NONE",
+            "log": deque(maxlen=10)
         }
 
-    def get_size_val(self, n): return 1 if int(n) >= 5 else 0
-    def get_size_str(self, s): return "BIG" if s == 1 else "SMALL"
+    def sync(self):
+        self.status = "SYNCING..."
+        print("📥 Fetching Data...")
+        for p in range(1, 51): 
+            try:
+                r = requests.get(API_URL, params={"size": "20", "pageNo": str(p)}, timeout=5)
+                if r.status_code == 200:
+                    data = r.json()['data']['list']
+                    for item in reversed(data): 
+                        obj = {'id': str(item['issueNumber']), 'n': int(item['number']), 'res': "BIG" if int(item['number']) >= 5 else "SMALL"}
+                        self.engine_A.add(obj)
+            except: pass
+            time.sleep(0.05)
+        self.engine_B.train(self.engine_A.data)
+        print("✅ System Ready.")
+        self.status = "RUNNING"
 
-    def get_bet_size(self, level):
-        factors = {"SURESHOT": 0.05, "HIGH": 0.03, "GOOD": 0.01, "LOW": 0}
-        return self.bankroll * factors.get(level, 0)
-
-    def analyze_ensemble(self):
-        hist_list = list(self.history)
-        if len(hist_list) < 5: return 0, 1.0
-
-        # Mode is always 's_val' (Size Value)
-        seq = ''.join(str(x['s_val']) for x in hist_list[-5:])
-        p1 = self.pat_size.get(seq, 0.5)
-
-        last3 = tuple(hist_list[-3:][j]['s_val'] for j in range(3))
-        target_markov = self.markov_size
-        p2 = 0.5
-        if last3 in target_markov:
-            s = target_markov[last3]
-            tot = sum(s.values())
-            if tot > 0: 
-                p2 = s['BIG']/tot
-
-        recent = [x['s_val'] for x in hist_list[-3:]]
-        p3 = sum(recent) / 3.0
-
-        # Weighted Ensemble: Pattern (50%) + Markov (30%) + Recent Trend (20%)
-        ensemble_pred = (p1 * 0.5 + p2 * 0.3 + p3 * 0.2)
-        strength = min(4.0, abs(ensemble_pred - 0.5) * 10) # Increased multiplier for clearer signal
-        return 1 if ensemble_pred > 0.5 else 0, strength
-
-    def update_kalman(self, actual_val):
-        gain = 0.15
-        error = actual_val - self.kalman_size_prob
-        self.kalman_size_prob += gain * error
-
-    def sync_data(self):
-        try:
-            all_data = []
-            r = requests.get(API_URL, params={"size": str(FRESH_HISTORY_LIMIT), "pageNo": "1"}, timeout=5)
-            if r.status_code == 200:
-                data = r.json().get('data', {}).get('list', [])
-                if len(data) > 0: all_data = data
-
-            # Fetch older pages if needed
-            if len(all_data) < FRESH_HISTORY_LIMIT:
-                for p in range(1, 26): # Reduced pages to speed up sync
-                    r = requests.get(API_URL, params={"size": "50", "pageNo": str(p)}, timeout=3)
-                    if r.status_code == 200:
-                        data = r.json().get('data', {}).get('list', [])
-                        if not data: break
-                        all_data.extend(data)
-                        if len(all_data) > FRESH_HISTORY_LIMIT: break
-
-            # FIXED SYNTAX ERROR HERE
-            if not all_data: return False
-
-            all_data.sort(key=lambda x: int(x['issueNumber']))
-            self.history.clear()
-            for item in all_data[-FRESH_HISTORY_LIMIT:]:
-                n = int(item['number'])
-                self.history.append({
-                    'n': n, 'id': str(item['issueNumber']),
-                    's_val': self.get_size_val(n)
-                })
-            self.train_engines()
-            return True
-        except Exception as e:
-            print(f"Sync error: {e}")
-            return False
-
-    def train_engines(self):
-        self.markov_size.clear()
-        hist_list = list(self.history)
-        for i in range(3, len(hist_list)):
-            ps = tuple(hist_list[j]['s_val'] for j in range(i-3, i))
-            rs = 'BIG' if hist_list[i]['s_val'] == 1 else 'SMALL'
-            self.markov_size[ps][rs] += 1
-
-    def get_best_bet(self):
-        s_pred, s_strength = self.analyze_ensemble()
-
-        # Kalman adjustment
-        s_final = s_pred * self.kalman_size_prob + (1-s_pred) * (1-self.kalman_size_prob)
+    def loop(self):
+        self.sync()
+        last_id = None
         
-        # PURE SIZE LOGIC
-        raw_score = s_strength
-        final_target = self.get_size_str(s_pred)
-        final_type = "SIZE" # Always Size
+        while True:
+            try:
+                r = requests.get(API_URL, params={"size": "1", "pageNo": "1"}, timeout=5)
+                if r.status_code != 200: time.sleep(1); continue
 
-        if raw_score >= 3.0: final_level = "SURESHOT"
-        elif raw_score >= 2.0: final_level = "HIGH"
-        elif raw_score >= 1.2: final_level = "GOOD"
-        else: final_level = "LOW"
+                latest = r.json()['data']['list'][0]
+                curr_id = str(latest['issueNumber'])
+                curr_num = int(latest['number'])
+                curr_res = "BIG" if curr_num >= 5 else "SMALL"
 
-        return final_target, final_type, final_level, raw_score
-
-    def update_performance(self, raw_score, win):
-        score_key = round(raw_score, 1)
-        self.score_performance[score_key]['total'] += 1
-        if win: self.score_performance[score_key]['wins'] += 1
-
-    def reset_session(self):
-        self.wins = 0
-        self.losses = 0
-        self.session_wins = 0
-        self.consecutive_losses = 0
-        self.consecutive_wins = 0
-        print(">>> SESSION RESET - NEW STREAK STARTED <<<")
-
-# ==========================================
-# WORKER - STREAK ESCALATION GENIUS
-# ==========================================
-bot = TitanBrain()
-state = {
-    "period": "...", "pred": "--", "type": "...", "level": "LOW",
-    "wins": 0, "losses": 0, "session": 0, "history": [],
-    "bankroll": BANKROLL, "bet_size": 0, "streak": "NORMAL"
-}
-
-def worker():
-    last_id = None
-    while True:
-        try:
-            if not bot.history: bot.sync_data()
-
-            r = requests.get(API_URL, params={"size": "1", "pageNo": "1"}, timeout=4)
-            if r.status_code != 200:
-                time.sleep(3); continue
-
-            data = r.json()
-            if not data.get('data', {}).get('list'):
-                time.sleep(3); continue
-
-            d = data['data']['list'][0]
-            cid = str(d['issueNumber'])
-            n = int(d['number'])
-
-            if cid != last_id:
-                real = None
-                status = "WAIT"
-                
-                # Check Win/Loss based strictly on SIZE
-                if bot.last_pred and bot.last_pred != "SKIP":
-                    win = False
+                if curr_id != last_id:
+                    # 1. Result Processing
+                    res_str = "SKIP"
+                    profit_str = "0.00"
                     
-                    real_val = bot.get_size_val(n)
-                    real = bot.get_size_str(real_val)
-                    win = (bot.last_pred == real)
-                    bot.update_kalman(real_val)
+                    if self.bet_val > 0 and last_id:
+                        if self.prediction == curr_res:
+                            self.bank.update_result(True)
+                            res_str = "WIN"
+                            profit_str = f"+{self.bet_val*0.98:.2f}"
+                            self.ui_data['last_win'] = "WIN"
+                            print(f"✅ WIN | Bank: {self.bank.bankroll}")
+                        else:
+                            self.bank.update_result(False)
+                            res_str = "LOSS"
+                            profit_str = f"-{self.bet_val:.2f}"
+                            self.ui_data['last_win'] = "LOSS"
+                            print(f"❌ LOSS | Level Up: {self.bank.level}")
 
-                    bet_amt = state.get('bet_size', 0)
-                    if win:
-                        bot.bankroll += bet_amt
-                        bot.wins += 1
-                        bot.session_wins += 1
-                        bot.consecutive_losses = 0
-                        bot.consecutive_wins += 1
-                        status = "WIN"
-                        bot.update_performance(2.5, True)
+                        self.ui_data['log'].appendleft({
+                            'id': curr_id, 'p': self.prediction, 
+                            'r': f"{curr_res} ({curr_num})", 
+                            'o': res_str, 'm': profit_str
+                        })
+
+                    # 2. Update & Predict
+                    self.engine_A.add({'id': curr_id, 'n': curr_num, 'res': curr_res})
+                    self.engine_B.train(self.engine_A.data)
+
+                    pred_a, conf_a = self.engine_A.analyze()
+                    pred_b, conf_b = self.engine_B.analyze()
+
+                    # 3. Decision
+                    agreed = False
+                    final_pred = "WAIT"
+                    
+                    if pred_a == pred_b and pred_a != "WAIT":
+                        if conf_a >= MIN_PATTERN_CONF:
+                            agreed = True
+                            final_pred = pred_a
+                    
+                    # Panic Recovery Override (Level 4+)
+                    if self.bank.level >= 4 and pred_a != "WAIT" and conf_a >= 0.70:
+                        agreed = True
+                        final_pred = pred_a
+
+                    self.bet_val = self.bank.get_bet(conf_a, agreed)
+                    self.prediction = final_pred
+                    self.curr_issue = str(int(curr_id) + 1)
+                    
+                    self.ui_data.update({
+                        "p1": pred_a, "c1": f"{conf_a:.0%}",
+                        "p2": pred_b, "c2": f"{conf_b:.0%}",
+                        "agreement": "YES" if agreed else "NO"
+                    })
+                    
+                    if agreed:
+                        print(f"🔔 BET: {final_pred} ({conf_a:.0%}) | Amt: {self.bet_val}")
                     else:
-                        bot.bankroll -= bet_amt
-                        bot.losses += 1
-                        bot.consecutive_wins = 0
-                        bot.consecutive_losses += 1
-                        status = "LOSS"
-                        bot.update_performance(2.5, False)
+                        print(f"⚠️ SKIP: Conflict or Low Conf")
 
-                # Update history for UI
-                state["history"].insert(0, {
-                    "p": cid[-4:],
-                    "r": f"{real}" if real else "--",
-                    "s": status,
-                    "l": bot.last_conf
-                })
-                state["history"] = state["history"][:20]
+                    last_id = curr_id
 
-                if bot.session_wins >= 15: # Increased goal
-                    bot.reset_session()
-                    state["history"] = []
-                    state["history"].insert(0, {"p": "RESET", "r": "TARGET HIT", "s": "DONE", "l": "SUCCESS"})
+                time.sleep(2)
+            except Exception as e:
+                print(e)
+                time.sleep(5)
 
-                bot.history.append({
-                    'n': n, 'id': cid,
-                    's_val': bot.get_size_val(n)
-                })
-                bot.train_engines()
-
-                # STREAK ESCALATION LOGIC
-                streak_level = min(bot.consecutive_losses, 2)
-                if streak_level == 0:
-                    required_score = 1.2
-                    target_level = "GOOD"
-                    streak_status = "NORMAL"
-                elif streak_level == 1:
-                    required_score = 1.4 # Stricter for recovery
-                    target_level = "HIGH"
-                    streak_status = "RECOVER L1"
-                else:  # streak_level == 2
-                    required_score = 1.0 # Aggressive recovery
-                    target_level = "SURESHOT"
-                    streak_status = "MAX BET L2"
-
-                pred, p_type, level, raw_score = bot.get_best_bet()
-                bet_size = bot.get_bet_size(target_level)
-                next_period = str(int(cid) + 1)
-
-                # BETTING DECISION
-                if raw_score >= required_score and bet_size > 0:
-                    bot.last_pred = pred
-                    bot.last_type = p_type
-                    bot.last_conf = target_level
-                    state.update({
-                        "period": next_period, "pred": pred, "type": "SIZE", # Forced Type
-                        "level": target_level, "wins": bot.wins, "losses": bot.losses,
-                        "session": bot.session_wins, "streak": streak_status,
-                        "bankroll": round(bot.bankroll, 0),
-                        "bet_size": round(bet_size, 0)
-                    })
-                else:
-                    bot.last_pred = "SKIP"
-                    bot.last_type = "NONE"
-                    bot.last_conf = "LOW"
-                    state.update({
-                        "period": next_period, "pred": "SKIP", "type": "ANALYZING",
-                        "level": "WAIT", "wins": bot.wins, "losses": bot.losses,
-                        "session": bot.session_wins, "streak": streak_status,
-                        "bankroll": round(bot.bankroll, 0),
-                        "bet_size": 0
-                    })
-
-                last_id = cid
-            time.sleep(1)
-
-        except Exception as e:
-            print(f"Error: {e}")
-            time.sleep(3)
-
-threading.Thread(target=worker, daemon=True).start()
+titan = TitanSystem()
+threading.Thread(target=titan.loop, daemon=True).start()
 
 # ==========================================
-# V3.2 PRODUCTION UI - STREAK DISPLAY
+# PRO DASHBOARD UI (HTML/CSS)
 # ==========================================
 HTML = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TITAN V4.0 - SIZE ONLY</title>
-    <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;700&display=swap" rel="stylesheet">
+    <title>TITAN V15 PRO</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <style>
-        :root { --bg: #000; --card: #111; --text: #fff; --green: #00e676; --red: #ff1744; --blue: #2979ff; --yellow: #ffeb3b; --orange: #ff9100; --purple: #d500f9; }
-        body { background: var(--bg); color: var(--text); font-family: 'Oswald', sans-serif; margin: 0; padding: 15px; text-align: center; text-transform: uppercase; }
-        .container { max-width: 500px; margin: 0 auto; }
-        .card { background: var(--card); border: 1px solid #222; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
-        .score-row { display: flex; justify-content: space-between; font-size: 20px; margin-bottom: 5px; border-bottom: 1px solid #222; padding-bottom: 10px; }
-        .w { color: var(--green); } .l { color: var(--red); }
-        .streak { font-size: 12px; color: var(--purple); font-weight: bold; }
-        .pred-box { margin: 20px 0; min-height: 120px; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-        .type-badge { font-size: 14px; color: #666; letter-spacing: 2px; margin-bottom: 5px; }
-        .val-BIG { color: var(--blue); font-size: 80px; font-weight: bold; text-shadow: 0 0 20px rgba(41,121,255,0.4); }
-        .val-SMALL { color: var(--orange); font-size: 80px; font-weight: bold; text-shadow: 0 0 20px rgba(255,145,0,0.4); }
-        .val-SKIP { font-size: 40px; color: #555; animation: pulse 2s infinite; }
-        .conf-badge { padding: 8px 16px; border-radius: 6px; font-size: 18px; display: inline-block; color: #000; font-weight: bold; }
-        .lvl-WAIT { background: #333; color: #777; }
-        .lvl-GOOD { background: var(--blue); }
-        .lvl-HIGH { background: var(--green); }
-        .lvl-SURESHOT { background: var(--purple); color: #fff; animation: pulse 0.5s infinite; }
-        .bankroll { font-size: 18px; color: var(--yellow); }
-        .row { display: flex; justify-content: space-between; padding: 12px; background: #0a0a0a; border-radius: 6px; margin-bottom: 5px; align-items: center; border-left: 4px solid #333; }
-        .row.WIN { border-left-color: var(--green); } .row.LOSS { border-left-color: var(--red); } .row.DONE { border-left-color: var(--yellow); }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        :root {
+            --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --muted: #94a3b8;
+            --accent: #3b82f6; --win: #22c55e; --loss: #ef4444; --gold: #f59e0b;
+            --big: #f97316; --small: #0ea5e9;
+        }
+        body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; margin: 0; padding: 20px; }
+        .container { max-width: 600px; margin: 0 auto; }
+        
+        /* HEADER */
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .brand { font-weight: 800; font-size: 1.2rem; letter-spacing: -0.02em; }
+        .badge { background: #334155; padding: 4px 12px; border-radius: 99px; font-size: 0.75rem; font-weight: 600; }
+        
+        /* MAIN CARD */
+        .card { background: var(--card); border-radius: 16px; padding: 24px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); border: 1px solid #334155; margin-bottom: 16px; }
+        .period-label { color: var(--muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+        .period-val { font-size: 1.5rem; font-weight: 700; color: #fff; margin-bottom: 20px; font-variant-numeric: tabular-nums; }
+        
+        .pred-container { text-align: center; padding: 30px 0; border-top: 1px solid #334155; border-bottom: 1px solid #334155; }
+        .pred-val { font-size: 4rem; font-weight: 900; line-height: 1; letter-spacing: -0.03em; }
+        .BIG { color: var(--big); text-shadow: 0 0 30px rgba(249, 115, 22, 0.3); }
+        .SMALL { color: var(--small); text-shadow: 0 0 30px rgba(14, 165, 233, 0.3); }
+        .WAIT { color: var(--muted); opacity: 0.5; }
+        
+        /* ENGINES */
+        .engines { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 20px; }
+        .eng-box { background: #0f172a; padding: 12px; border-radius: 8px; text-align: center; }
+        .eng-title { font-size: 0.7rem; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
+        .eng-res { font-weight: 700; font-size: 1rem; }
+        
+        /* STATS GRID */
+        .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+        .stat-card { background: var(--card); padding: 16px; border-radius: 12px; border: 1px solid #334155; }
+        .stat-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; }
+        .stat-val { font-size: 1.1rem; font-weight: 700; }
+        
+        /* HISTORY */
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        th { text-align: left; color: var(--muted); font-weight: 600; padding-bottom: 12px; font-size: 0.75rem; }
+        td { padding: 12px 0; border-bottom: 1px solid #334155; }
+        .win { color: var(--win); } .loss { color: var(--loss); }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="card">
-            <div class="score-row">
-                <span>TITAN V4.0 PURE SIZE</span>
-                <span id="bankroll" class="bankroll">₹10,000</span>
-            </div>
-            <div><span class="w" id="w">W:0</span> <span class="l" id="l">L:0</span></div>
-            <div style="font-size:12px;color:#666;">
-                PERIOD <span id="p" style="color:#fff;">...</span> | BET ₹<span id="bet">0</span>
-            </div>
-            <div class="streak" id="streak">NORMAL</div>
+        <div class="header">
+            <div class="brand">TITAN <span style="color:var(--accent)">V15 PRO</span></div>
+            <div class="badge" id="status">CONNECTING...</div>
         </div>
-        
+
         <div class="card">
-            <div class="pred-box">
-                <div id="type" class="type-badge">STREAK ANALYSIS...</div>
-                <div id="pred" class="val-BIG">--</div>
-                <div style="margin-top:15px;">
-                    <span id="lvl" class="conf-badge lvl-WAIT">WAIT</span>
+            <div style="display:flex; justify-content:space-between; align-items:end;">
+                <div>
+                    <div class="period-label">Current Period</div>
+                    <div class="period-val" id="period">Loading...</div>
+                </div>
+                <div class="badge" id="agree-badge" style="background:#0f172a;">ANALYZING</div>
+            </div>
+            
+            <div class="pred-container">
+                <div class="pred-val WAIT" id="pred">WAIT</div>
+                <div style="margin-top:10px; font-size:0.9rem; color:var(--muted)" id="bet-info">Waiting for signal...</div>
+            </div>
+
+            <div class="engines">
+                <div class="eng-box">
+                    <div class="eng-title">DEEP SEARCH</div>
+                    <div class="eng-res" id="eng1">--</div>
+                </div>
+                <div class="eng-box">
+                    <div class="eng-title">MARKOV TREND</div>
+                    <div class="eng-res" id="eng2">--</div>
                 </div>
             </div>
         </div>
-        
-        <div class="card">
-            <div style="text-align:left;color:#666;font-size:12px;margin-bottom:10px;">RECENT RESULTS</div>
-            <div id="hist"></div>
+
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-label">Bankroll</div>
+                <div class="stat-val" style="color:var(--gold)">$<span id="bank">0</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Next Bet</div>
+                <div class="stat-val">$<span id="bet">0</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Level</div>
+                <div class="stat-val" id="level">1</div>
+            </div>
+        </div>
+
+        <div class="card" style="padding: 20px;">
+            <div class="period-label" style="margin-bottom:15px;">Recent Activity</div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>PERIOD</th>
+                        <th>PRED</th>
+                        <th>RESULT</th>
+                        <th style="text-align:right">PROFIT</th>
+                    </tr>
+                </thead>
+                <tbody id="log-body"></tbody>
+            </table>
         </div>
     </div>
-    
+
     <script>
-        setInterval(() => {
-            fetch('/api/status').then(r => r.json()).then(d => {
-                document.getElementById('p').innerText = d.period;
-                document.getElementById('w').innerText = `W:${d.wins}`;
-                document.getElementById('l').innerText = `L:${d.losses}`;
-                document.getElementById('bankroll').innerText = `₹${d.bankroll}`;
-                document.getElementById('bet').innerText = d.bet_size;
-                document.getElementById('streak').innerText = d.streak;
+        function update() {
+            fetch('/data').then(r => r.json()).then(d => {
+                // Status & Header
+                document.getElementById('status').innerText = "LIVE SCANNING";
+                document.getElementById('status').style.color = "#22c55e";
                 
-                let pEl = document.getElementById('pred');
-                let tEl = document.getElementById('type');
-                let lEl = document.getElementById('lvl');
+                // Main Display
+                document.getElementById('period').innerText = d.period;
+                const pEl = document.getElementById('pred');
+                pEl.innerText = d.pred;
+                pEl.className = "pred-val " + d.pred;
                 
-                if (d.pred === 'SKIP') {
-                    tEl.innerText = 'WAITING FOR SIGNAL';
-                    pEl.innerText = 'SKIPPING';
-                    pEl.className = 'val-SKIP';
-                    lEl.innerText = 'WAIT';
-                    lEl.className = 'conf-badge lvl-WAIT';
+                // Agreement Badge
+                const agEl = document.getElementById('agree-badge');
+                if(d.d1.agreement === "YES") {
+                    agEl.innerText = "ENGINES AGREED";
+                    agEl.style.color = "#22c55e";
                 } else {
-                    tEl.innerText = `${d.type} ${d.streak}`;
-                    pEl.innerText = d.pred;
-                    pEl.className = `val-${d.pred}`;
-                    lEl.innerText = d.level;
-                    lEl.className = `conf-badge lvl-${d.level}`;
+                    agEl.innerText = "CONFLICT / LOW CONF";
+                    agEl.style.color = "#94a3b8";
                 }
+
+                // Bet Info text
+                const infoEl = document.getElementById('bet-info');
+                if (d.bet > 0) {
+                    infoEl.innerText = `CONFIRMED: Betting $${d.bet} on ${d.pred}`;
+                    infoEl.style.color = "#f8fafc";
+                } else {
+                    infoEl.innerText = "Skipping: Engines do not match or confidence too low.";
+                    infoEl.style.color = "#94a3b8";
+                }
+
+                // Engines
+                document.getElementById('eng1').innerText = `${d.d1.p} (${d.d1.c})`;
+                document.getElementById('eng1').style.color = d.d1.p === "BIG" ? "var(--big)" : (d.d1.p === "SMALL" ? "var(--small)" : "#fff");
                 
-                document.getElementById('hist').innerHTML = d.history.map(h => {
-                    let cls = h.s === 'WIN' ? 'WIN' : h.s === 'LOSS' ? 'LOSS' : 'DONE';
-                    return `<div class="row ${cls}">
-                        <span style="color:#666;">${h.p}</span>
-                        <span style="color:#eee;">${h.r}</span>
-                        <span style="color:${cls==='WIN'?'#00e676':cls==='LOSS'?'#ff1744':'#ffeb3b'}">${h.s}</span>
-                        <span style="color:#666;">${h.l}</span>
-                    </div>`;
-                }).join('');
+                document.getElementById('eng2').innerText = `${d.d2.p} (${d.d2.c})`;
+                document.getElementById('eng2').style.color = d.d2.p === "BIG" ? "var(--big)" : (d.d2.p === "SMALL" ? "var(--small)" : "#fff");
+
+                // Stats
+                document.getElementById('bank').innerText = d.bank;
+                document.getElementById('bet').innerText = d.bet;
+                document.getElementById('level').innerText = d.level;
+
+                // Logs
+                let html = '';
+                d.log.forEach(r => {
+                    const cls = r.o === 'WIN' ? 'win' : (r.o === 'LOSS' ? 'loss' : '');
+                    html += `<tr>
+                        <td>${r.id.slice(-4)}</td>
+                        <td style="font-weight:600">${r.p}</td>
+                        <td class="${cls}">${r.r}</td>
+                        <td class="${cls}" style="text-align:right">${r.m}</td>
+                    </tr>`;
+                });
+                document.getElementById('log-body').innerHTML = html;
             });
-        }, 1000);
+        }
+        setInterval(update, 1000);
     </script>
 </body>
 </html>
 """
 
 @app.route('/')
-def home(): return render_template_string(HTML)
+def index(): return render_template_string(HTML)
 
-@app.route('/api/status')
-def status(): return jsonify(state)
+@app.route('/data')
+def data():
+    return jsonify({
+        "period": titan.curr_issue,
+        "pred": titan.prediction,
+        "d1": {"p": titan.ui_data['p1'], "c": titan.ui_data['c1'], "agreement": titan.ui_data['agreement']},
+        "d2": {"p": titan.ui_data['p2'], "c": titan.ui_data['c2']},
+        "bank": round(titan.bank.bankroll, 2),
+        "bet": titan.bet_val,
+        "level": titan.bank.level,
+        "log": list(titan.ui_data['log'])
+    })
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5003))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    print("---------------------------------------")
+    print("TITAN V15 PRO - DASHBOARD LIVE")
+    print("GO TO: http://localhost:5050")
+    print("---------------------------------------")
+    app.run(host='0.0.0.0', port=5551, debug=False)
