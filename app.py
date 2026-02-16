@@ -12,7 +12,7 @@ from flask import Flask, render_template_string, jsonify
 # --- CONFIGURATION ---
 API_URL = "https://api-iok6.onrender.com/api/get_history"
 HISTORY_SIZE = 3000       
-INITIAL_BANKROLL = 10000.0
+INITIAL_BANKROLL = 100000.0
 BASE_BET = 50.0
 
 # --- LOGIC THRESHOLDS ---
@@ -453,3 +453,4 @@ if __name__ == '__main__':
     print("GO TO: http://localhost:5050")
     print("---------------------------------------")
     app.run(host='0.0.0.0', port=5551, debug=False)
+
